@@ -13,6 +13,8 @@ use agentsandbox_core::conformance;
 use agentsandbox_core::SandboxAdapter;
 use agentsandbox_docker::DockerAdapter;
 
+const FORCE_INTEGRATION_ENV: &str = "AGENTSANDBOX_INTEGRATION";
+
 async fn adapter_or_skip() -> Option<DockerAdapter> {
     let adapter = DockerAdapter::new().ok()?;
     adapter.health_check().await.ok()?;
@@ -20,12 +22,32 @@ async fn adapter_or_skip() -> Option<DockerAdapter> {
     Some(adapter)
 }
 
+async fn adapter_or_fail() -> DockerAdapter {
+    match adapter_or_skip().await {
+        Some(adapter) => adapter,
+        None => panic!(
+            "Docker non disponibile. Avvia un daemon Docker reale oppure non eseguire \
+             la suite di conformance. Per forzare il controllo end-to-end usa \
+             {FORCE_INTEGRATION_ENV}=1."
+        ),
+    }
+}
+
+fn integration_forced() -> bool {
+    std::env::var(FORCE_INTEGRATION_ENV).as_deref() == Ok("1")
+}
+
 #[tokio::test]
 #[ignore = "richiede Docker in esecuzione"]
 async fn create_and_destroy() {
-    let Some(adapter) = adapter_or_skip().await else {
-        eprintln!("skip: Docker non disponibile");
-        return;
+    let adapter = if integration_forced() {
+        adapter_or_fail().await
+    } else {
+        let Some(adapter) = adapter_or_skip().await else {
+            eprintln!("skip: Docker non disponibile");
+            return;
+        };
+        adapter
     };
     conformance::test_create_and_destroy(&adapter).await;
 }
@@ -33,8 +55,14 @@ async fn create_and_destroy() {
 #[tokio::test]
 #[ignore = "richiede Docker in esecuzione"]
 async fn exec_returns_stdout() {
-    let Some(adapter) = adapter_or_skip().await else {
-        return;
+    let adapter = if integration_forced() {
+        adapter_or_fail().await
+    } else {
+        let Some(adapter) = adapter_or_skip().await else {
+            eprintln!("skip: Docker non disponibile");
+            return;
+        };
+        adapter
     };
     conformance::test_exec_returns_stdout(&adapter).await;
 }
@@ -42,8 +70,14 @@ async fn exec_returns_stdout() {
 #[tokio::test]
 #[ignore = "richiede Docker in esecuzione"]
 async fn exec_captures_stderr() {
-    let Some(adapter) = adapter_or_skip().await else {
-        return;
+    let adapter = if integration_forced() {
+        adapter_or_fail().await
+    } else {
+        let Some(adapter) = adapter_or_skip().await else {
+            eprintln!("skip: Docker non disponibile");
+            return;
+        };
+        adapter
     };
     conformance::test_exec_captures_stderr(&adapter).await;
 }
@@ -51,8 +85,14 @@ async fn exec_captures_stderr() {
 #[tokio::test]
 #[ignore = "richiede Docker in esecuzione"]
 async fn inspect_running() {
-    let Some(adapter) = adapter_or_skip().await else {
-        return;
+    let adapter = if integration_forced() {
+        adapter_or_fail().await
+    } else {
+        let Some(adapter) = adapter_or_skip().await else {
+            eprintln!("skip: Docker non disponibile");
+            return;
+        };
+        adapter
     };
     conformance::test_inspect_running(&adapter).await;
 }
@@ -60,8 +100,14 @@ async fn inspect_running() {
 #[tokio::test]
 #[ignore = "richiede Docker in esecuzione"]
 async fn destroy_nonexistent_is_ok() {
-    let Some(adapter) = adapter_or_skip().await else {
-        return;
+    let adapter = if integration_forced() {
+        adapter_or_fail().await
+    } else {
+        let Some(adapter) = adapter_or_skip().await else {
+            eprintln!("skip: Docker non disponibile");
+            return;
+        };
+        adapter
     };
     conformance::test_destroy_nonexistent_is_ok(&adapter).await;
 }

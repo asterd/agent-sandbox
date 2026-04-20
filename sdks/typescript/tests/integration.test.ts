@@ -7,38 +7,35 @@
  * `AGENTSANDBOX_INTEGRATION=1`.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { DEFAULT_DAEMON_URL, Sandbox } from "../src/index.js";
 
 const DAEMON = process.env.AGENTSANDBOX_DAEMON_URL ?? DEFAULT_DAEMON_URL;
 const FORCED = process.env.AGENTSANDBOX_INTEGRATION === "1";
 
-let daemonReady = false;
-
-beforeAll(async () => {
+async function probeDaemon(): Promise<boolean> {
   try {
     const res = await fetch(`${DAEMON}/v1/health`, {
       signal: AbortSignal.timeout(500),
     });
-    daemonReady = res.ok;
+    return res.ok;
   } catch {
-    daemonReady = false;
+    return false;
   }
-  if (FORCED && !daemonReady) {
-    throw new Error(`Integration forzata ma daemon non raggiungibile su ${DAEMON}`);
-  }
-});
+}
 
-const maybe = () => (daemonReady ? describe : describe.skip);
+const daemonReady = await probeDaemon();
 
-afterAll(() => {
-  if (!daemonReady && !FORCED) {
-    // eslint-disable-next-line no-console
-    console.info(`[integration] daemon non raggiungibile su ${DAEMON}: test skippati`);
-  }
-});
+if (FORCED && !daemonReady) {
+  throw new Error(`Integration forzata ma daemon non raggiungibile su ${DAEMON}`);
+}
 
-maybe()("integration", () => {
+if (!daemonReady && !FORCED) {
+  // eslint-disable-next-line no-console
+  console.info(`[integration] daemon non raggiungibile su ${DAEMON}: test skippati`);
+}
+
+(daemonReady ? describe : describe.skip)("integration", () => {
   it("esegue un comando in una sandbox reale", async () => {
     await using sb = await Sandbox.create({
       runtime: "python",
