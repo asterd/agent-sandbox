@@ -1,0 +1,152 @@
+//! HTTP error envelope.
+//!
+//! Every error that leaves the daemon goes through [`ApiError`]. The JSON
+//! shape is part of the public contract (`docs/api-http-v1.md`):
+//!
+//! ```json
+//! { "error": { "code": "SANDBOX_NOT_FOUND", "message": "...", "details": {} } }
+//! ```
+//!
+//! Internal details (sqlx errors, raw bollard strings) are logged but never
+//! surfaced verbatim — we map them to stable codes.
+
+use agentsandbox_core::adapter::AdapterError;
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
+use serde_json::{json, Value};
+
+#[derive(Debug, Clone, Copy)]
+pub enum ApiErrorCode {
+    SandboxNotFound,
+    SandboxExpired,
+    SpecInvalid,
+    BackendUnavailable,
+    ExecTimeout,
+    LeaseInvalid,
+    InternalError,
+}
+
+impl ApiErrorCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ApiErrorCode::SandboxNotFound => "SANDBOX_NOT_FOUND",
+            ApiErrorCode::SandboxExpired => "SANDBOX_EXPIRED",
+            ApiErrorCode::SpecInvalid => "SPEC_INVALID",
+            ApiErrorCode::BackendUnavailable => "BACKEND_UNAVAILABLE",
+            ApiErrorCode::ExecTimeout => "EXEC_TIMEOUT",
+            ApiErrorCode::LeaseInvalid => "LEASE_INVALID",
+            ApiErrorCode::InternalError => "INTERNAL_ERROR",
+        }
+    }
+
+    pub fn status(&self) -> StatusCode {
+        match self {
+            ApiErrorCode::SandboxNotFound => StatusCode::NOT_FOUND,
+            ApiErrorCode::SandboxExpired => StatusCode::GONE,
+            ApiErrorCode::SpecInvalid => StatusCode::UNPROCESSABLE_ENTITY,
+            ApiErrorCode::BackendUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            ApiErrorCode::ExecTimeout => StatusCode::GATEWAY_TIMEOUT,
+            ApiErrorCode::LeaseInvalid => StatusCode::FORBIDDEN,
+            ApiErrorCode::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ApiError {
+    pub code: ApiErrorCode,
+    pub message: String,
+    pub details: Option<Value>,
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}] {}", self.code.as_str(), self.message)
+    }
+}
+
+impl std::error::Error for ApiError {}
+
+impl ApiError {
+    pub fn new(code: ApiErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            details: None,
+        }
+    }
+
+    pub fn not_found(id: &str) -> Self {
+        Self::new(
+            ApiErrorCode::SandboxNotFound,
+            format!("sandbox {id} non trovata"),
+        )
+    }
+
+    pub fn spec_invalid(msg: impl Into<String>) -> Self {
+        Self::new(ApiErrorCode::SpecInvalid, msg)
+    }
+
+    pub fn lease_invalid() -> Self {
+        Self::new(ApiErrorCode::LeaseInvalid, "lease token mancante o non valido")
+    }
+
+    pub fn internal(msg: impl Into<String>) -> Self {
+        Self::new(ApiErrorCode::InternalError, msg)
+    }
+}
+
+impl From<AdapterError> for ApiError {
+    fn from(e: AdapterError) -> Self {
+        let code = match e {
+            AdapterError::NotFound(_) => ApiErrorCode::SandboxNotFound,
+            AdapterError::BackendUnavailable(_) => ApiErrorCode::BackendUnavailable,
+            AdapterError::Timeout(_) => ApiErrorCode::ExecTimeout,
+            AdapterError::ExecFailed { .. } | AdapterError::Internal(_) => {
+                ApiErrorCode::InternalError
+            }
+        };
+        ApiError::new(code, e.to_string())
+    }
+}
+
+impl From<sqlx::Error> for ApiError {
+    fn from(e: sqlx::Error) -> Self {
+        tracing::error!(error = %e, "sqlx error");
+        ApiError::internal("errore persistenza")
+    }
+}
+
+impl From<serde_json::Error> for ApiError {
+    fn from(e: serde_json::Error) -> Self {
+        ApiError::spec_invalid(format!("JSON non valido: {e}"))
+    }
+}
+
+impl From<serde_yaml::Error> for ApiError {
+    fn from(e: serde_yaml::Error) -> Self {
+        ApiError::spec_invalid(format!("YAML non valido: {e}"))
+    }
+}
+
+impl From<agentsandbox_core::compile::CompileError> for ApiError {
+    fn from(e: agentsandbox_core::compile::CompileError) -> Self {
+        ApiError::spec_invalid(e.to_string())
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let body = json!({
+            "error": {
+                "code": self.code.as_str(),
+                "message": self.message,
+                "details": self.details.unwrap_or_else(|| json!({})),
+            }
+        });
+        (self.code.status(), Json(body)).into_response()
+    }
+}

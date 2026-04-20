@@ -1,0 +1,44 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Environment and local overrides
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Rust workspace
+/target/
+
+# TypeScript SDK
+sdks/typescript/node_modules/
+sdks/typescript/dist/
+*.tsbuildinfo
+coverage/
+
+# Python SDK
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+sdks/python/.venv/
+venv/
+.venv/
+
+# Local runtime data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+tmp/
+temp/

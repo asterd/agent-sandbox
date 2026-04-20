@@ -1,0 +1,21 @@
+[package]
+name = "agentsandbox-docker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Docker backend adapter for AgentSandbox"
+
+[dependencies]
+agentsandbox-core = { path = "../agentsandbox-core" }
+async-trait = { workspace = true }
+bollard = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+agentsandbox-core = { path = "../agentsandbox-core", features = ["conformance"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
