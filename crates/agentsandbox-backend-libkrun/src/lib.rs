@@ -56,17 +56,10 @@ impl BackendFactory for LibkrunBackendFactory {
             .cloned()
             .unwrap_or_else(|| "krun".into());
 
-        let client = bollard::Docker::connect_with_unix(
-            &socket,
-            30,
-            bollard::API_DEFAULT_VERSION,
-        )
-        .map_err(|error| BackendError::Unavailable(error.to_string()))?;
+        let client = bollard::Docker::connect_with_unix(&socket, 30, bollard::API_DEFAULT_VERSION)
+            .map_err(|error| BackendError::Unavailable(error.to_string()))?;
 
-        let inner = agentsandbox_backend_docker::DockerBackend::with_runtime(
-            client,
-            Some(runtime),
-        );
+        let inner = agentsandbox_backend_docker::DockerBackend::with_runtime(client, Some(runtime));
         Ok(Box::new(LibkrunBackend {
             inner: Box::new(inner),
         }))

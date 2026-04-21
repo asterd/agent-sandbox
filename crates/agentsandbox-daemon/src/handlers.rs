@@ -8,7 +8,7 @@ use agentsandbox_core::compile_value;
 use agentsandbox_sdk::backend::{BackendCapabilities, SandboxState};
 use agentsandbox_sdk::error::BackendError;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::{header, HeaderMap},
     Json,
 };
@@ -18,8 +18,8 @@ use serde_json::{json, Value};
 
 use crate::audit::{self, Event};
 use crate::error::ApiError;
-use crate::state::SharedState;
-use crate::store::{self, SandboxRow};
+use crate::state::{AuthContext, SharedState};
+use crate::store::{self, AccessScope, SandboxRow};
 
 const LEASE_HEADER: &str = "X-Lease-Token";
 const EXTENSIONS_HEADER: &str = "X-AgentSandbox-Extensions";
@@ -137,7 +137,9 @@ fn parse_hidden_extensions(headers: &HeaderMap) -> Result<Option<Value>, ApiErro
     };
 
     let raw = raw.to_str().map_err(|_| {
-        ApiError::spec_invalid(format!("{EXTENSIONS_HEADER} deve essere testo UTF-8 valido"))
+        ApiError::spec_invalid(format!(
+            "{EXTENSIONS_HEADER} deve essere testo UTF-8 valido"
+        ))
     })?;
     let value: Value = serde_json::from_str(raw).map_err(|e| {
         ApiError::spec_invalid(format!(
@@ -156,9 +158,14 @@ fn parse_hidden_extensions(headers: &HeaderMap) -> Result<Option<Value>, ApiErro
 
 pub async fn create_sandbox(
     State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<(axum::http::StatusCode, Json<CreateResponse>), ApiError> {
+    if let (Some(tenant_id), Some(hourly_quota)) = (auth.tenant_id(), auth.hourly_quota()) {
+        store::consume_hourly_quota(&state.db, tenant_id, hourly_quota).await?;
+    }
+
     let raw_spec = parse_spec_body(&headers, &body)?;
     let hidden_extensions = parse_hidden_extensions(&headers)?;
     // Keep the original submission for audit — reserialise as JSON so the
@@ -168,16 +175,19 @@ pub async fn create_sandbox(
     ir.extensions = hidden_extensions;
 
     let lease_token = uuid::Uuid::new_v4().to_string();
-    let (backend_id, backend) = state
-        .registry
-        .select(&ir)
-        .map_err(|e| ApiError::new(crate::error::ApiErrorCode::BackendUnavailable, e.to_string()))?;
+    let (backend_id, backend) = state.registry.select(&ir).map_err(|e| {
+        ApiError::new(
+            crate::error::ApiErrorCode::BackendUnavailable,
+            e.to_string(),
+        )
+    })?;
     backend.can_satisfy(&ir).await?;
 
     let row = store::insert_sandbox(
         &state.db,
         store::NewSandbox {
             id: &ir.id,
+            tenant_id: auth.tenant_id(),
             lease_token: &lease_token,
             backend: &backend_id,
             spec_json: &spec_json,
@@ -319,10 +329,12 @@ async fn refresh_runtime_status(
         return Ok(row);
     }
 
-    let backend = state
-        .registry
-        .get(&row.backend)
-        .map_err(|e| ApiError::new(crate::error::ApiErrorCode::BackendUnavailable, e.to_string()))?;
+    let backend = state.registry.get(&row.backend).map_err(|e| {
+        ApiError::new(
+            crate::error::ApiErrorCode::BackendUnavailable,
+            e.to_string(),
+        )
+    })?;
 
     match backend.status(row.runtime_handle()).await {
         Ok(info) => {
@@ -359,9 +371,10 @@ async fn refresh_runtime_status(
 
 pub async fn inspect_sandbox(
     State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Result<Json<InspectResponse>, ApiError> {
-    let row = store::get_sandbox(&state.db, &id)
+    let row = store::get_sandbox_scoped(&state.db, &id, access_scope(&auth))
         .await?
         .ok_or_else(|| ApiError::not_found(&id))?;
     let row = refresh_runtime_status(&state, row).await?;
@@ -392,11 +405,12 @@ fn default_limit() -> i64 {
 
 pub async fn list_sandboxes(
     State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
     Query(params): Query<ListParams>,
 ) -> Result<Json<Value>, ApiError> {
     let limit = params.limit.clamp(1, 500);
     let offset = params.offset.max(0);
-    let rows = store::list_active(&state.db, limit, offset).await?;
+    let rows = store::list_active_scoped(&state.db, limit, offset, access_scope(&auth)).await?;
     let items: Vec<_> = rows
         .into_iter()
         .map(|row| async {
@@ -442,12 +456,24 @@ pub struct ExecResponse {
     pub duration_ms: u64,
 }
 
-async fn require_lease(state: &SharedState, id: &str, headers: &HeaderMap) -> Result<(), ApiError> {
+fn access_scope(auth: &AuthContext) -> AccessScope<'_> {
+    match auth {
+        AuthContext::SingleUser => AccessScope::All,
+        AuthContext::Tenant(tenant) => AccessScope::Tenant(&tenant.id),
+    }
+}
+
+async fn require_lease(
+    state: &SharedState,
+    auth: &AuthContext,
+    id: &str,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
     let token = headers
         .get(LEASE_HEADER)
         .and_then(|v| v.to_str().ok())
         .ok_or_else(ApiError::lease_invalid)?;
-    if !store::verify_lease(&state.db, id, token).await? {
+    if !store::verify_lease_scoped(&state.db, id, token, access_scope(auth)).await? {
         return Err(ApiError::lease_invalid());
     }
     Ok(())
@@ -455,13 +481,14 @@ async fn require_lease(state: &SharedState, id: &str, headers: &HeaderMap) -> Re
 
 pub async fn exec_sandbox(
     State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     headers: HeaderMap,
     Json(req): Json<ExecRequest>,
 ) -> Result<Json<ExecResponse>, ApiError> {
-    require_lease(&state, &id, &headers).await?;
+    require_lease(&state, &auth, &id, &headers).await?;
 
-    let row = store::get_sandbox(&state.db, &id)
+    let row = store::get_sandbox_scoped(&state.db, &id, access_scope(&auth))
         .await?
         .ok_or_else(|| ApiError::not_found(&id))?;
     if row.status != "running" {
@@ -471,11 +498,15 @@ pub async fn exec_sandbox(
         ));
     }
 
-    let backend = state
-        .registry
-        .get(&row.backend)
-        .map_err(|e| ApiError::new(crate::error::ApiErrorCode::BackendUnavailable, e.to_string()))?;
-    let result = backend.exec(row.runtime_handle(), &req.command, None).await?;
+    let backend = state.registry.get(&row.backend).map_err(|e| {
+        ApiError::new(
+            crate::error::ApiErrorCode::BackendUnavailable,
+            e.to_string(),
+        )
+    })?;
+    let result = backend
+        .exec(row.runtime_handle(), &req.command, None)
+        .await?;
     audit::record(
         &state.db,
         &id,
@@ -499,21 +530,27 @@ pub async fn exec_sandbox(
 
 pub async fn destroy_sandbox(
     State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<axum::http::StatusCode, ApiError> {
     // Destroy accepts the lease when present but also works without it when
     // the sandbox row doesn't exist (idempotent cleanup by id). When the row
     // DOES exist the lease is required — otherwise anyone could kill it.
-    if store::get_sandbox(&state.db, &id).await?.is_some() {
-        require_lease(&state, &id, &headers).await?;
+    if store::get_sandbox_scoped(&state.db, &id, access_scope(&auth))
+        .await?
+        .is_some()
+    {
+        require_lease(&state, &auth, &id, &headers).await?;
     }
 
-    if let Some(row) = store::get_sandbox(&state.db, &id).await? {
-        let backend = state
-            .registry
-            .get(&row.backend)
-            .map_err(|e| ApiError::new(crate::error::ApiErrorCode::BackendUnavailable, e.to_string()))?;
+    if let Some(row) = store::get_sandbox_scoped(&state.db, &id, access_scope(&auth)).await? {
+        let backend = state.registry.get(&row.backend).map_err(|e| {
+            ApiError::new(
+                crate::error::ApiErrorCode::BackendUnavailable,
+                e.to_string(),
+            )
+        })?;
         backend.destroy(row.runtime_handle()).await?;
     }
     store::delete_sandbox(&state.db, &id).await?;
@@ -531,7 +568,6 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use async_trait::async_trait;
     use agentsandbox_sdk::{
         backend::{
             BackendCapabilities, BackendDescriptor, BackendFactory, ExecResult, IsolationLevel,
@@ -540,12 +576,21 @@ mod tests {
         error::BackendError,
         ir::SandboxIR,
     };
+    use async_trait::async_trait;
     use chrono::{Duration, Utc};
-    use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
+    use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
     use std::str::FromStr;
     use tower::ServiceExt;
 
-    use crate::{registry::BackendRegistry, router, state::AppState};
+    use crate::{
+        config::{
+            AuthMode, AuthSection, BackendsSection, DaemonConfig, DaemonSection, DatabaseSection,
+        },
+        registry::BackendRegistry,
+        router,
+        state::AppState,
+        store,
+    };
 
     enum InspectBehavior {
         Status(SandboxState),
@@ -655,10 +700,30 @@ mod tests {
         pool
     }
 
+    async fn test_db_pre_multitenancy() -> SqlitePool {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::query(include_str!("../migrations/001_initial.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(include_str!("../migrations/002_backend_handle.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool
+    }
+
     async fn test_state(
         db: SqlitePool,
         inspect_behavior: InspectBehavior,
-    ) -> (Arc<AppState>, Arc<Mutex<Vec<String>>>, Arc<Mutex<Option<Value>>>) {
+    ) -> (
+        Arc<AppState>,
+        Arc<Mutex<Vec<String>>>,
+        Arc<Mutex<Option<Value>>>,
+    ) {
         let mut registry = BackendRegistry::new();
         let destroyed = Arc::new(Mutex::new(Vec::new()));
         let last_extensions = Arc::new(Mutex::new(None));
@@ -673,6 +738,7 @@ mod tests {
         (
             Arc::new(AppState {
                 db,
+                config: test_config(AuthMode::SingleUser),
                 registry: Arc::new(registry),
             }),
             destroyed,
@@ -683,7 +749,11 @@ mod tests {
     async fn test_state_with_extensions(
         db: SqlitePool,
         inspect_behavior: InspectBehavior,
-    ) -> (Arc<AppState>, Arc<Mutex<Vec<String>>>, Arc<Mutex<Option<Value>>>) {
+    ) -> (
+        Arc<AppState>,
+        Arc<Mutex<Vec<String>>>,
+        Arc<Mutex<Option<Value>>>,
+    ) {
         let mut registry = BackendRegistry::new();
         let destroyed = Arc::new(Mutex::new(Vec::new()));
         let last_extensions = Arc::new(Mutex::new(None));
@@ -698,6 +768,7 @@ mod tests {
         (
             Arc::new(AppState {
                 db,
+                config: test_config(AuthMode::SingleUser),
                 registry: Arc::new(registry),
             }),
             destroyed,
@@ -705,13 +776,38 @@ mod tests {
         )
     }
 
+    fn test_config(mode: AuthMode) -> DaemonConfig {
+        DaemonConfig {
+            daemon: DaemonSection {
+                host: "127.0.0.1".into(),
+                port: 7847,
+                log_level: "info".into(),
+                log_format: "text".into(),
+            },
+            database: DatabaseSection {
+                url: "sqlite::memory:".into(),
+            },
+            auth: AuthSection { mode },
+            backends: BackendsSection {
+                enabled: vec!["mock".into()],
+                bubblewrap: Default::default(),
+                docker: Default::default(),
+                gvisor: Default::default(),
+                libkrun: Default::default(),
+                nsjail: Default::default(),
+                podman: Default::default(),
+                wasmtime: Default::default(),
+            },
+        }
+    }
+
     async fn insert_running_row(pool: &SqlitePool, id: &str) {
         let created_at = Utc::now();
         let expires_at = created_at + Duration::seconds(60);
         sqlx::query(
             "INSERT INTO sandboxes \
-             (id, lease_token, status, backend, backend_handle, spec_json, ir_json, created_at, expires_at) \
-             VALUES (?1, ?2, 'running', 'mock', ?3, '{}', '{}', ?4, ?5)",
+             (id, tenant_id, lease_token, status, backend, backend_handle, spec_json, ir_json, created_at, expires_at) \
+             VALUES (?1, NULL, ?2, 'running', 'mock', ?3, '{}', '{}', ?4, ?5)",
         )
         .bind(id)
         .bind("lease")
@@ -854,7 +950,8 @@ mod tests {
         .await
         .unwrap();
 
-        let (state, destroyed, _) = test_state(db.clone(), InspectBehavior::Status(SandboxState::Running)).await;
+        let (state, destroyed, _) =
+            test_state(db.clone(), InspectBehavior::Status(SandboxState::Running)).await;
         let app = router::build(state);
 
         let response = app
@@ -871,7 +968,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
 
         let destroyed = destroyed.lock().unwrap().clone();
         assert_eq!(destroyed.len(), 1);
@@ -905,7 +1005,10 @@ mod tests {
 
         assert_eq!(response.status(), axum::http::StatusCode::CREATED);
         let captured = last_extensions.lock().unwrap().clone();
-        assert_eq!(captured, Some(serde_json::json!({"gvisor":{"network":"host"}})));
+        assert_eq!(
+            captured,
+            Some(serde_json::json!({"gvisor":{"network":"host"}}))
+        );
     }
 
     #[tokio::test]
@@ -933,5 +1036,103 @@ mod tests {
             response.status(),
             axum::http::StatusCode::UNPROCESSABLE_ENTITY
         );
+    }
+
+    #[tokio::test]
+    async fn api_key_mode_rejects_requests_without_header() {
+        let db = test_db().await;
+        let (mut state, _, _) =
+            test_state(db, InspectBehavior::Status(SandboxState::Running)).await;
+        Arc::get_mut(&mut state).unwrap().config.auth.mode = AuthMode::ApiKey;
+        let app = router::build(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"apiVersion":"sandbox.ai/v1","kind":"Sandbox","metadata":{},"spec":{"runtime":{"preset":"python"}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn api_key_mode_persists_tenant_and_enforces_hourly_quota() {
+        let db = test_db().await;
+        sqlx::query(
+            "INSERT INTO tenants (id, api_key_hash, quota_hourly, quota_concurrent, enabled, created_at) \
+             VALUES (?1, ?2, 1, 10, 1, ?3)",
+        )
+        .bind("tenant-a")
+        .bind(store::hash_api_key_for_tests("secret-key"))
+        .bind(Utc::now().to_rfc3339())
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let (mut state, _, _) =
+            test_state(db.clone(), InspectBehavior::Status(SandboxState::Running)).await;
+        Arc::get_mut(&mut state).unwrap().config.auth.mode = AuthMode::ApiKey;
+        let app = router::build(state);
+
+        let request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/sandboxes")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-API-Key", "secret-key")
+                .body(Body::from(
+                    r#"{"apiVersion":"sandbox.ai/v1","kind":"Sandbox","metadata":{},"spec":{"runtime":{"preset":"python"}}}"#,
+                ))
+                .unwrap()
+        };
+
+        let first = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(first.status(), axum::http::StatusCode::CREATED);
+
+        let row = sqlx::query("SELECT tenant_id FROM sandboxes LIMIT 1")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            row.get::<Option<String>, _>("tenant_id"),
+            Some("tenant-a".into())
+        );
+
+        let second = app.oneshot(request()).await.unwrap();
+        assert_eq!(second.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn multitenancy_migration_applies_to_existing_schema() {
+        let db = test_db_pre_multitenancy().await;
+
+        sqlx::query(include_str!("../migrations/003_multitenancy.sql"))
+            .execute(&db)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "INSERT INTO tenants (id, api_key_hash, quota_hourly, quota_concurrent, enabled, created_at) \
+             VALUES ('tenant-a', 'hash', 10, 5, 1, '2026-01-01T00:00:00+00:00')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO rate_limit_windows (tenant_id, window_start, count) \
+             VALUES ('tenant-a', '2026-01-01T01:00:00+00:00', 1)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
     }
 }

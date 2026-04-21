@@ -149,7 +149,10 @@ impl EgressProxy {
 
     async fn handle_client(&self, client: TcpStream) -> Result<()> {
         let mut first_byte = [0u8; 1];
-        let peeked = client.peek(&mut first_byte).await.context("peek client preface")?;
+        let peeked = client
+            .peek(&mut first_byte)
+            .await
+            .context("peek client preface")?;
         if peeked == 0 {
             bail!("client closed before sending a request");
         }
@@ -299,10 +302,18 @@ impl EgressProxy {
         }
     }
 
-    async fn connect_target(&self, target: &TargetAddr, upstream_addr: SocketAddr) -> Result<TcpStream> {
-        TcpStream::connect(upstream_addr)
-            .await
-            .with_context(|| format!("connect upstream {} for {}", upstream_addr, target.log_label()))
+    async fn connect_target(
+        &self,
+        target: &TargetAddr,
+        upstream_addr: SocketAddr,
+    ) -> Result<TcpStream> {
+        TcpStream::connect(upstream_addr).await.with_context(|| {
+            format!(
+                "connect upstream {} for {}",
+                upstream_addr,
+                target.log_label()
+            )
+        })
     }
 }
 
@@ -590,8 +601,11 @@ mod tests {
 
         client
             .write_all(
-                format!("CONNECT localhost:{} HTTP/1.1\r\nHost: localhost\r\n\r\n", upstream_addr.port())
-                    .as_bytes(),
+                format!(
+                    "CONNECT localhost:{} HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                    upstream_addr.port()
+                )
+                .as_bytes(),
             )
             .await
             .unwrap();

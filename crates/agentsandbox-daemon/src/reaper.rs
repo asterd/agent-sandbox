@@ -48,7 +48,12 @@ pub async fn sweep(state: &SharedState) -> Result<usize, crate::error::ApiError>
                 }
             }
         }
-        store::set_status(&state.db, &id, agentsandbox_sdk::backend::SandboxState::Stopped).await?;
+        store::set_status(
+            &state.db,
+            &id,
+            agentsandbox_sdk::backend::SandboxState::Stopped,
+        )
+        .await?;
         audit::record(&state.db, &id, Event::Expired, None).await;
     }
     Ok(count)
@@ -57,9 +62,11 @@ pub async fn sweep(state: &SharedState) -> Result<usize, crate::error::ApiError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::HashMap, sync::{Arc, Mutex}};
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
 
-    use async_trait::async_trait;
     use agentsandbox_sdk::{
         backend::{
             BackendCapabilities, BackendDescriptor, BackendFactory, ExecResult, IsolationLevel,
@@ -68,11 +75,19 @@ mod tests {
         error::BackendError,
         ir::SandboxIR,
     };
+    use async_trait::async_trait;
     use chrono::{Duration, Utc};
     use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
     use std::str::FromStr;
 
-    use crate::{registry::BackendRegistry, state::AppState, store};
+    use crate::{
+        config::{
+            AuthMode, AuthSection, BackendsSection, DaemonConfig, DaemonSection, DatabaseSection,
+        },
+        registry::BackendRegistry,
+        state::AppState,
+        store,
+    };
 
     #[derive(Default)]
     struct MockBackend {
@@ -190,8 +205,8 @@ mod tests {
         let created_at = expires_at - Duration::seconds(60);
         sqlx::query(
             "INSERT INTO sandboxes \
-             (id, lease_token, status, backend, backend_handle, spec_json, ir_json, created_at, expires_at) \
-             VALUES (?1, ?2, 'running', 'mock', ?3, '{}', '{}', ?4, ?5)",
+             (id, tenant_id, lease_token, status, backend, backend_handle, spec_json, ir_json, created_at, expires_at) \
+             VALUES (?1, NULL, ?2, 'running', 'mock', ?3, '{}', '{}', ?4, ?5)",
         )
         .bind(id)
         .bind(format!("lease-{id}"))
@@ -218,6 +233,30 @@ mod tests {
         registry.initialize(&factory, &HashMap::new()).await;
         let state = Arc::new(AppState {
             db: db.clone(),
+            config: DaemonConfig {
+                daemon: DaemonSection {
+                    host: "127.0.0.1".into(),
+                    port: 7847,
+                    log_level: "info".into(),
+                    log_format: "text".into(),
+                },
+                database: DatabaseSection {
+                    url: "sqlite::memory:".into(),
+                },
+                auth: AuthSection {
+                    mode: AuthMode::SingleUser,
+                },
+                backends: BackendsSection {
+                    enabled: vec!["mock".into()],
+                    bubblewrap: Default::default(),
+                    docker: Default::default(),
+                    gvisor: Default::default(),
+                    libkrun: Default::default(),
+                    nsjail: Default::default(),
+                    podman: Default::default(),
+                    wasmtime: Default::default(),
+                },
+            },
             registry: Arc::new(registry),
         });
 

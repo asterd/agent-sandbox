@@ -11,6 +11,7 @@ use agentsandbox_sdk::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 
 use crate::error::ApiError;
@@ -80,6 +81,7 @@ impl From<&SandboxIR> for StoredIr {
 #[derive(Debug, Clone)]
 pub struct SandboxRow {
     pub id: String,
+    pub tenant_id: Option<String>,
     pub lease_token: String,
     pub status: String,
     pub backend: String,
@@ -97,6 +99,7 @@ impl SandboxRow {
     fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
             id: row.try_get("id")?,
+            tenant_id: row.try_get("tenant_id")?,
             lease_token: row.try_get("lease_token")?,
             status: row.try_get("status")?,
             backend: row.try_get("backend")?,
@@ -117,11 +120,38 @@ fn parse_ts(s: String) -> Result<DateTime<Utc>, sqlx::Error> {
 /// Input for inserting a new sandbox row. Caller owns id/token generation.
 pub struct NewSandbox<'a> {
     pub id: &'a str,
+    pub tenant_id: Option<&'a str>,
     pub lease_token: &'a str,
     pub backend: &'a str,
     pub spec_json: &'a str,
     pub ir: &'a SandboxIR,
     pub ttl_seconds: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TenantRecord {
+    pub id: String,
+    pub quota_hourly: i64,
+    pub quota_concurrent: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AccessScope<'a> {
+    All,
+    Tenant(&'a str),
+}
+
+fn api_key_hash(key: &str) -> String {
+    let digest = Sha256::digest(key.as_bytes());
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+fn current_window_start(now: DateTime<Utc>) -> String {
+    now.format("%Y-%m-%dT%H:00:00+00:00").to_string()
 }
 
 pub async fn insert_sandbox(
@@ -134,10 +164,11 @@ pub async fn insert_sandbox(
 
     sqlx::query(
         "INSERT INTO sandboxes \
-         (id, lease_token, status, backend, backend_handle, spec_json, ir_json, created_at, expires_at) \
-         VALUES (?1, ?2, 'creating', ?3, NULL, ?4, ?5, ?6, ?7)",
+         (id, tenant_id, lease_token, status, backend, backend_handle, spec_json, ir_json, created_at, expires_at) \
+         VALUES (?1, ?2, ?3, 'creating', ?4, NULL, ?5, ?6, ?7, ?8)",
     )
     .bind(new.id)
+    .bind(new.tenant_id)
     .bind(new.lease_token)
     .bind(new.backend)
     .bind(new.spec_json)
@@ -149,6 +180,7 @@ pub async fn insert_sandbox(
 
     Ok(SandboxRow {
         id: new.id.to_string(),
+        tenant_id: new.tenant_id.map(ToOwned::to_owned),
         lease_token: new.lease_token.to_string(),
         status: "creating".into(),
         backend: new.backend.to_string(),
@@ -172,11 +204,7 @@ pub async fn set_backend_handle(
     Ok(())
 }
 
-pub async fn set_status(
-    pool: &SqlitePool,
-    id: &str,
-    status: SandboxState,
-) -> Result<(), ApiError> {
+pub async fn set_status(pool: &SqlitePool, id: &str, status: SandboxState) -> Result<(), ApiError> {
     let (status_str, err) = match status {
         SandboxState::Failed(msg) => ("error".to_string(), Some(msg)),
         other => (other.as_str().to_string(), None),
@@ -201,6 +229,33 @@ pub async fn get_sandbox(pool: &SqlitePool, id: &str) -> Result<Option<SandboxRo
     }
 }
 
+pub async fn get_sandbox_scoped(
+    pool: &SqlitePool,
+    id: &str,
+    scope: AccessScope<'_>,
+) -> Result<Option<SandboxRow>, ApiError> {
+    let row = match scope {
+        AccessScope::All => {
+            sqlx::query("SELECT * FROM sandboxes WHERE id = ?1")
+                .bind(id)
+                .fetch_optional(pool)
+                .await?
+        }
+        AccessScope::Tenant(tenant_id) => {
+            sqlx::query("SELECT * FROM sandboxes WHERE id = ?1 AND tenant_id = ?2")
+                .bind(id)
+                .bind(tenant_id)
+                .fetch_optional(pool)
+                .await?
+        }
+    };
+
+    match row {
+        Some(r) => Ok(Some(SandboxRow::from_row(&r)?)),
+        None => Ok(None),
+    }
+}
+
 pub async fn list_active(
     pool: &SqlitePool,
     limit: i64,
@@ -216,6 +271,46 @@ pub async fn list_active(
     .bind(offset)
     .fetch_all(pool)
     .await?;
+    rows.iter()
+        .map(SandboxRow::from_row)
+        .collect::<Result<_, _>>()
+        .map_err(Into::into)
+}
+
+pub async fn list_active_scoped(
+    pool: &SqlitePool,
+    limit: i64,
+    offset: i64,
+    scope: AccessScope<'_>,
+) -> Result<Vec<SandboxRow>, ApiError> {
+    let rows = match scope {
+        AccessScope::All => {
+            sqlx::query(
+                "SELECT * FROM sandboxes \
+                 WHERE status IN ('creating','running') \
+                 ORDER BY created_at DESC \
+                 LIMIT ?1 OFFSET ?2",
+            )
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool)
+            .await?
+        }
+        AccessScope::Tenant(tenant_id) => {
+            sqlx::query(
+                "SELECT * FROM sandboxes \
+                 WHERE tenant_id = ?1 AND status IN ('creating','running') \
+                 ORDER BY created_at DESC \
+                 LIMIT ?2 OFFSET ?3",
+            )
+            .bind(tenant_id)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+
     rows.iter()
         .map(SandboxRow::from_row)
         .collect::<Result<_, _>>()
@@ -254,4 +349,88 @@ pub async fn verify_lease(pool: &SqlitePool, id: &str, token: &str) -> Result<bo
     Ok(row
         .and_then(|r| r.try_get::<String, _>("lease_token").ok())
         .is_some_and(|t| t == token))
+}
+
+pub async fn verify_lease_scoped(
+    pool: &SqlitePool,
+    id: &str,
+    token: &str,
+    scope: AccessScope<'_>,
+) -> Result<bool, ApiError> {
+    let row = match scope {
+        AccessScope::All => {
+            sqlx::query("SELECT lease_token FROM sandboxes WHERE id = ?1")
+                .bind(id)
+                .fetch_optional(pool)
+                .await?
+        }
+        AccessScope::Tenant(tenant_id) => {
+            sqlx::query("SELECT lease_token FROM sandboxes WHERE id = ?1 AND tenant_id = ?2")
+                .bind(id)
+                .bind(tenant_id)
+                .fetch_optional(pool)
+                .await?
+        }
+    };
+    Ok(row
+        .and_then(|r| r.try_get::<String, _>("lease_token").ok())
+        .is_some_and(|t| t == token))
+}
+
+pub async fn verify_api_key(
+    pool: &SqlitePool,
+    key: &str,
+) -> Result<Option<TenantRecord>, ApiError> {
+    let row = sqlx::query(
+        "SELECT id, quota_hourly, quota_concurrent \
+         FROM tenants WHERE api_key_hash = ?1 AND enabled = 1",
+    )
+    .bind(api_key_hash(key))
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|row| TenantRecord {
+        id: row.get("id"),
+        quota_hourly: row.get("quota_hourly"),
+        quota_concurrent: row.get("quota_concurrent"),
+    }))
+}
+
+pub async fn consume_hourly_quota(
+    pool: &SqlitePool,
+    tenant_id: &str,
+    quota_hourly: i64,
+) -> Result<(), ApiError> {
+    let window_start = current_window_start(Utc::now());
+    sqlx::query(
+        "INSERT INTO rate_limit_windows (tenant_id, window_start, count) \
+         VALUES (?1, ?2, 0) \
+         ON CONFLICT(tenant_id, window_start) DO NOTHING",
+    )
+    .bind(tenant_id)
+    .bind(&window_start)
+    .execute(pool)
+    .await?;
+
+    let result = sqlx::query(
+        "UPDATE rate_limit_windows \
+         SET count = count + 1 \
+         WHERE tenant_id = ?1 AND window_start = ?2 AND count < ?3",
+    )
+    .bind(tenant_id)
+    .bind(&window_start)
+    .bind(quota_hourly)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(ApiError::rate_limited("quota oraria superata"));
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+pub fn hash_api_key_for_tests(key: &str) -> String {
+    api_key_hash(key)
 }

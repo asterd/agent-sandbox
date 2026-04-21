@@ -10,12 +10,7 @@ use agentsandbox_sdk::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    process::Stdio,
-    sync::Arc,
-};
+use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc};
 use tokio::{process::Command, sync::Mutex, time::timeout};
 
 #[derive(Clone)]
@@ -156,15 +151,12 @@ impl BackendFactory for NsjailBackendFactory {
             .get("nsjail_path")
             .cloned()
             .unwrap_or_else(|| "nsjail".into());
-        let chroot_base = config
-            .get("chroot_base")
-            .cloned()
-            .unwrap_or_else(|| {
-                std::env::temp_dir()
-                    .join("agentsandbox-nsjail")
-                    .to_string_lossy()
-                    .into_owned()
-            });
+        let chroot_base = config.get("chroot_base").cloned().unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join("agentsandbox-nsjail")
+                .to_string_lossy()
+                .into_owned()
+        });
         Ok(Box::new(NsjailBackend::new(nsjail_path, chroot_base)))
     }
 }

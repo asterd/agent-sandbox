@@ -25,7 +25,14 @@ pub struct DatabaseSection {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct AuthSection {
-    pub mode: String,
+    pub mode: AuthMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMode {
+    SingleUser,
+    ApiKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -221,7 +228,11 @@ fn apply_env_overrides(cfg: &mut DaemonConfig) -> anyhow::Result<()> {
         cfg.database.url = url;
     }
     if let Ok(mode) = std::env::var("AS_AUTH_MODE") {
-        cfg.auth.mode = mode;
+        cfg.auth.mode = match mode.as_str() {
+            "single_user" => AuthMode::SingleUser,
+            "api_key" => AuthMode::ApiKey,
+            _ => anyhow::bail!("AS_AUTH_MODE non valido: {mode}"),
+        };
     }
     if let Ok(enabled) = std::env::var("AS_BACKENDS_ENABLED") {
         cfg.backends.enabled = enabled
@@ -375,6 +386,7 @@ socket = "/tmp/podman.sock"
         assert_eq!(cfg.daemon.host, "0.0.0.0");
         assert_eq!(cfg.daemon.port, 9000);
         assert_eq!(cfg.database.url, "sqlite://dev.db");
+        assert_eq!(cfg.auth.mode, AuthMode::ApiKey);
         assert_eq!(
             cfg.backends.docker.socket.as_deref(),
             Some("/tmp/docker.sock")
@@ -419,6 +431,7 @@ backends:
         let cfg = load_config(&path).unwrap();
         assert_eq!(cfg.daemon.port, 7848);
         assert_eq!(cfg.database.url, "sqlite://yaml.db");
+        assert_eq!(cfg.auth.mode, AuthMode::SingleUser);
         assert_eq!(
             cfg.backends.gvisor.socket.as_deref(),
             Some("/tmp/gvisor.sock")

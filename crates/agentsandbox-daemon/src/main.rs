@@ -94,8 +94,10 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("nessun backend disponibile");
     }
 
+    let addr = cfg.listen_addr();
     let state = Arc::new(AppState {
         db,
+        config: cfg,
         registry: Arc::new(registry),
     });
 
@@ -103,7 +105,6 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move { reaper::run(reaper_state).await });
 
     let app = router::build(state);
-    let addr = cfg.listen_addr();
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("daemon in ascolto su http://{addr}");
     axum::serve(listener, app).await?;

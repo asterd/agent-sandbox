@@ -11,12 +11,7 @@ use agentsandbox_sdk::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    process::Stdio,
-    sync::Arc,
-};
+use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc};
 use tempfile::NamedTempFile;
 use tokio::{process::Command, sync::Mutex, time::timeout};
 
@@ -316,9 +311,10 @@ impl SandboxBackend for BubblewrapBackend {
                 ));
             }
 
-            let userns_enabled = std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
-                .map(|value| value.trim() != "0")
-                .unwrap_or(true);
+            let userns_enabled =
+                std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
+                    .map(|value| value.trim() != "0")
+                    .unwrap_or(true);
             if !userns_enabled {
                 return Err(BackendError::Unavailable(
                     "user namespaces disabilitati: abilita kernel.unprivileged_userns_clone=1"

@@ -24,6 +24,8 @@ pub enum ApiErrorCode {
     SandboxNotFound,
     SandboxExpired,
     SpecInvalid,
+    Unauthorized,
+    RateLimitExceeded,
     BackendUnavailable,
     ExecTimeout,
     LeaseInvalid,
@@ -36,6 +38,8 @@ impl ApiErrorCode {
             ApiErrorCode::SandboxNotFound => "SANDBOX_NOT_FOUND",
             ApiErrorCode::SandboxExpired => "SANDBOX_EXPIRED",
             ApiErrorCode::SpecInvalid => "SPEC_INVALID",
+            ApiErrorCode::Unauthorized => "UNAUTHORIZED",
+            ApiErrorCode::RateLimitExceeded => "RATE_LIMIT_EXCEEDED",
             ApiErrorCode::BackendUnavailable => "BACKEND_UNAVAILABLE",
             ApiErrorCode::ExecTimeout => "EXEC_TIMEOUT",
             ApiErrorCode::LeaseInvalid => "LEASE_INVALID",
@@ -48,6 +52,8 @@ impl ApiErrorCode {
             ApiErrorCode::SandboxNotFound => StatusCode::NOT_FOUND,
             ApiErrorCode::SandboxExpired => StatusCode::GONE,
             ApiErrorCode::SpecInvalid => StatusCode::UNPROCESSABLE_ENTITY,
+            ApiErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
+            ApiErrorCode::RateLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
             ApiErrorCode::BackendUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             ApiErrorCode::ExecTimeout => StatusCode::GATEWAY_TIMEOUT,
             ApiErrorCode::LeaseInvalid => StatusCode::FORBIDDEN,
@@ -89,6 +95,14 @@ impl ApiError {
 
     pub fn spec_invalid(msg: impl Into<String>) -> Self {
         Self::new(ApiErrorCode::SpecInvalid, msg)
+    }
+
+    pub fn unauthorized(msg: impl Into<String>) -> Self {
+        Self::new(ApiErrorCode::Unauthorized, msg)
+    }
+
+    pub fn rate_limited(msg: impl Into<String>) -> Self {
+        Self::new(ApiErrorCode::RateLimitExceeded, msg)
     }
 
     pub fn with_details(mut self, details: Value) -> Self {

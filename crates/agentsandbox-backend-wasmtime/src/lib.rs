@@ -8,11 +8,7 @@ use agentsandbox_sdk::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 use tracing::warn;
 use wasmtime::{Engine, Instance, Module, Store};
@@ -211,14 +207,12 @@ impl WasmtimeBackend {
             .ok_or_else(|| BackendError::Internal("exit_code mancante".into()))?;
 
         let data = memory.data(&store);
-        let stdout = String::from_utf8_lossy(
-            &data[stdout_ptr as usize..(stdout_ptr + stdout_len) as usize],
-        )
-        .into_owned();
-        let stderr = String::from_utf8_lossy(
-            &data[stderr_ptr as usize..(stderr_ptr + stderr_len) as usize],
-        )
-        .into_owned();
+        let stdout =
+            String::from_utf8_lossy(&data[stdout_ptr as usize..(stdout_ptr + stdout_len) as usize])
+                .into_owned();
+        let stderr =
+            String::from_utf8_lossy(&data[stderr_ptr as usize..(stderr_ptr + stderr_len) as usize])
+                .into_owned();
 
         Ok(ExecResult {
             stdout,
@@ -258,7 +252,10 @@ impl SandboxBackend for WasmtimeBackend {
     ) -> Result<ExecResult, BackendError> {
         let session = self.session(handle).await?;
         let extensions = Self::parse_extensions(&session.ir)?;
-        if extensions.wasm_binary.is_some() || self.python_wasm_path.is_some() || self.node_wasm_path.is_some() {
+        if extensions.wasm_binary.is_some()
+            || self.python_wasm_path.is_some()
+            || self.node_wasm_path.is_some()
+        {
             warn!(
                 sandbox_id = %handle,
                 "runtime wasm custom configurato ma in questa fase e' attivo solo il compat runner"
@@ -360,10 +357,16 @@ fn parse_python_print(command: &str) -> Result<Option<String>, BackendError> {
 
 fn parse_shell_string(value: &str) -> Option<String> {
     let value = value.trim();
-    if let Some(inner) = value.strip_prefix('\'').and_then(|raw| raw.strip_suffix('\'')) {
+    if let Some(inner) = value
+        .strip_prefix('\'')
+        .and_then(|raw| raw.strip_suffix('\''))
+    {
         return Some(inner.to_string());
     }
-    if let Some(inner) = value.strip_prefix('"').and_then(|raw| raw.strip_suffix('"')) {
+    if let Some(inner) = value
+        .strip_prefix('"')
+        .and_then(|raw| raw.strip_suffix('"'))
+    {
         return Some(inner.to_string());
     }
     Some(value.to_string())
@@ -429,7 +432,9 @@ impl ExprParser {
                 self.pos += 1;
                 let value = self.parse_expr()?;
                 if self.peek() != Some(')') {
-                    return Err(BackendError::NotSupported("parentesi non bilanciate".into()));
+                    return Err(BackendError::NotSupported(
+                        "parentesi non bilanciate".into(),
+                    ));
                 }
                 self.pos += 1;
                 Ok(value)

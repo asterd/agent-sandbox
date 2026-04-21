@@ -9,6 +9,7 @@ pub mod audit;
 pub mod config;
 pub mod error;
 pub mod handlers;
+pub mod middleware;
 pub mod reaper;
 pub mod registry;
 pub mod router;

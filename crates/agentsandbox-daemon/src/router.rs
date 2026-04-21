@@ -2,11 +2,12 @@
 //! in-memory SQLite DB and a mock adapter.
 
 use axum::{
+    middleware,
     routing::{delete, get, post},
     Router,
 };
 
-use crate::{handlers, state::SharedState};
+use crate::{handlers, middleware::auth::auth_middleware, state::SharedState};
 
 pub fn build(state: SharedState) -> Router {
     Router::new()
@@ -17,5 +18,9 @@ pub fn build(state: SharedState) -> Router {
         .route("/v1/sandboxes/:id", get(handlers::inspect_sandbox))
         .route("/v1/sandboxes/:id/exec", post(handlers::exec_sandbox))
         .route("/v1/sandboxes/:id", delete(handlers::destroy_sandbox))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         .with_state(state)
 }

@@ -39,12 +39,8 @@ impl BackendFactory for DockerBackendFactory {
             .map(String::as_str)
             .unwrap_or("/var/run/docker.sock");
 
-        let client = bollard::Docker::connect_with_unix(
-            socket,
-            30,
-            bollard::API_DEFAULT_VERSION,
-        )
-        .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+        let client = bollard::Docker::connect_with_unix(socket, 30, bollard::API_DEFAULT_VERSION)
+            .map_err(|e| BackendError::Unavailable(e.to_string()))?;
 
         Ok(Box::new(crate::DockerBackend::with_client(client)))
     }

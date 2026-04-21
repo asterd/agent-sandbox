@@ -10,7 +10,9 @@ pub struct ConformanceReport {
 
 impl ConformanceReport {
     pub fn new() -> Self {
-        Self { results: Vec::new() }
+        Self {
+            results: Vec::new(),
+        }
     }
 
     pub fn all_passed(&self) -> bool {
@@ -24,7 +26,11 @@ impl ConformanceReport {
                 Err(message) => println!("  err {name} - {message}"),
             }
         }
-        let passed = self.results.iter().filter(|(_, result)| result.is_ok()).count();
+        let passed = self
+            .results
+            .iter()
+            .filter(|(_, result)| result.is_ok())
+            .count();
         println!("\n  {passed}/{} test passati", self.results.len());
     }
 }
