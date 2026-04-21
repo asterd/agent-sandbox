@@ -5,6 +5,7 @@ members = [
     "crates/agentsandbox-core",
     "crates/agentsandbox-daemon",
     "crates/agentsandbox-backend-docker",
+    "crates/agentsandbox-backend-podman",
 ]
 resolver = "2"
 

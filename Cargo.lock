@@ -20,6 +20,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentsandbox-backend-podman"
+version = "0.1.0"
+dependencies = [
+ "agentsandbox-backend-docker",
+ "agentsandbox-conformance",
+ "agentsandbox-sdk",
+ "async-trait",
+ "chrono",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "agentsandbox-conformance"
 version = "0.1.0"
 dependencies = [
@@ -45,6 +58,7 @@ name = "agentsandbox-daemon"
 version = "0.1.0"
 dependencies = [
  "agentsandbox-backend-docker",
+ "agentsandbox-backend-podman",
  "agentsandbox-core",
  "agentsandbox-sdk",
  "anyhow",

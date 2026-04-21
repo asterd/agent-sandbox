@@ -33,10 +33,17 @@ pub struct BackendsSection {
     pub enabled: Vec<String>,
     #[serde(default)]
     pub docker: DockerBackendSection,
+    #[serde(default)]
+    pub podman: PodmanBackendSection,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct DockerBackendSection {
+    pub socket: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct PodmanBackendSection {
     pub socket: Option<String>,
 }
 
@@ -52,6 +59,13 @@ impl BackendsSection {
             "docker" => {
                 let mut config = std::collections::HashMap::new();
                 if let Some(socket) = &self.docker.socket {
+                    config.insert("socket".into(), socket.clone());
+                }
+                config
+            }
+            "podman" => {
+                let mut config = std::collections::HashMap::new();
+                if let Some(socket) = &self.podman.socket {
                     config.insert("socket".into(), socket.clone());
                 }
                 config
@@ -117,6 +131,9 @@ fn apply_env_overrides(cfg: &mut DaemonConfig) -> anyhow::Result<()> {
     }
     if let Ok(socket) = std::env::var("AS_BACKENDS_DOCKER_SOCKET") {
         cfg.backends.docker.socket = Some(socket);
+    }
+    if let Ok(socket) = std::env::var("AS_BACKENDS_PODMAN_SOCKET") {
+        cfg.backends.podman.socket = Some(socket);
     }
     Ok(())
 }
@@ -199,10 +216,13 @@ url = "sqlite://dev.db"
 mode = "api_key"
 
 [backends]
-enabled = ["docker"]
+enabled = ["docker", "podman"]
 
 [backends.docker]
 socket = "/tmp/docker.sock"
+
+[backends.podman]
+socket = "/tmp/podman.sock"
 "#,
         );
 
@@ -213,6 +233,10 @@ socket = "/tmp/docker.sock"
         assert_eq!(
             cfg.backends.docker.socket.as_deref(),
             Some("/tmp/docker.sock")
+        );
+        assert_eq!(
+            cfg.backends.podman.socket.as_deref(),
+            Some("/tmp/podman.sock")
         );
     }
 
@@ -233,13 +257,19 @@ database:
 auth:
   mode: single_user
 backends:
-  enabled: [docker]
+  enabled: [docker, podman]
+  podman:
+    socket: /tmp/podman.sock
 "#,
         );
 
         let cfg = load_config(&path).unwrap();
         assert_eq!(cfg.daemon.port, 7848);
         assert_eq!(cfg.database.url, "sqlite://yaml.db");
+        assert_eq!(
+            cfg.backends.podman.socket.as_deref(),
+            Some("/tmp/podman.sock")
+        );
     }
 
     #[test]
@@ -266,11 +296,44 @@ enabled = ["docker"]
         );
         let _port = EnvGuard::set("AS_DAEMON_PORT", "9999");
         let _db = EnvGuard::set("AS_DATABASE_URL", "sqlite://env.db");
-        let _enabled = EnvGuard::set("AS_BACKENDS_ENABLED", "docker,noop");
+        let _enabled = EnvGuard::set("AS_BACKENDS_ENABLED", "docker,podman");
+        let _podman_socket = EnvGuard::set("AS_BACKENDS_PODMAN_SOCKET", "/env/podman.sock");
 
         let cfg = load_config(&path).unwrap();
         assert_eq!(cfg.daemon.port, 9999);
         assert_eq!(cfg.database.url, "sqlite://env.db");
-        assert_eq!(cfg.backends.enabled, vec!["docker", "noop"]);
+        assert_eq!(cfg.backends.enabled, vec!["docker", "podman"]);
+        assert_eq!(
+            cfg.backends.podman.socket.as_deref(),
+            Some("/env/podman.sock")
+        );
+    }
+
+    #[test]
+    fn config_for_returns_backend_specific_socket() {
+        let backends = BackendsSection {
+            enabled: vec!["docker".into(), "podman".into()],
+            docker: DockerBackendSection {
+                socket: Some("/docker.sock".into()),
+            },
+            podman: PodmanBackendSection {
+                socket: Some("/podman.sock".into()),
+            },
+        };
+
+        assert_eq!(
+            backends
+                .config_for("docker")
+                .get("socket")
+                .map(String::as_str),
+            Some("/docker.sock")
+        );
+        assert_eq!(
+            backends
+                .config_for("podman")
+                .get("socket")
+                .map(String::as_str),
+            Some("/podman.sock")
+        );
     }
 }

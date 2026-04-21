@@ -10,6 +10,7 @@ description = "HTTP daemon for AgentSandbox"
 agentsandbox-sdk = { path = "../agentsandbox-sdk" }
 agentsandbox-core = { path = "../agentsandbox-core" }
 agentsandbox-backend-docker = { path = "../agentsandbox-backend-docker" }
+agentsandbox-backend-podman = { path = "../agentsandbox-backend-podman" }
 anyhow = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true }

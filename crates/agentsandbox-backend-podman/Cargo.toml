@@ -1,0 +1,18 @@
+[package]
+name = "agentsandbox-backend-podman"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Podman backend plugin for AgentSandbox"
+
+[dependencies]
+agentsandbox-sdk = { path = "../agentsandbox-sdk" }
+agentsandbox-backend-docker = { path = "../agentsandbox-backend-docker" }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+agentsandbox-conformance = { path = "../agentsandbox-conformance" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

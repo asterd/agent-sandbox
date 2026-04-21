@@ -108,3 +108,118 @@ pub enum RegistryError {
     #[error("backend '{0}' richiesto ma non disponibile")]
     RequestedUnavailable(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentsandbox_sdk::{
+        backend::{
+            BackendCapabilities, BackendDescriptor, BackendFactory, ExecResult, IsolationLevel,
+            SandboxState, SandboxStatus,
+        },
+        error::BackendError,
+    };
+    use async_trait::async_trait;
+    use chrono::Utc;
+
+    struct TestFactory {
+        descriptor: BackendDescriptor,
+    }
+
+    impl BackendFactory for TestFactory {
+        fn describe(&self) -> BackendDescriptor {
+            self.descriptor.clone()
+        }
+
+        fn create(
+            &self,
+            _config: &HashMap<String, String>,
+        ) -> Result<Box<dyn SandboxBackend>, BackendError> {
+            Ok(Box::new(TestBackend {
+                backend_id: self.descriptor.id,
+            }))
+        }
+    }
+
+    struct TestBackend {
+        backend_id: &'static str,
+    }
+
+    #[async_trait]
+    impl SandboxBackend for TestBackend {
+        async fn create(&self, _ir: &SandboxIR) -> Result<String, BackendError> {
+            Ok("handle".into())
+        }
+
+        async fn exec(
+            &self,
+            _handle: &str,
+            _command: &str,
+            _timeout_ms: Option<u64>,
+        ) -> Result<ExecResult, BackendError> {
+            Ok(ExecResult {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                duration_ms: 0,
+                resource_usage: None,
+            })
+        }
+
+        async fn status(&self, handle: &str) -> Result<SandboxStatus, BackendError> {
+            Ok(SandboxStatus {
+                sandbox_id: handle.into(),
+                state: SandboxState::Running,
+                created_at: Utc::now(),
+                expires_at: Utc::now(),
+                backend_id: self.backend_id.into(),
+            })
+        }
+
+        async fn destroy(&self, _handle: &str) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        async fn health_check(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
+    fn make_factory(id: &'static str) -> TestFactory {
+        TestFactory {
+            descriptor: BackendDescriptor {
+                id,
+                display_name: id,
+                version: "test",
+                trait_version: "1",
+                capabilities: BackendCapabilities {
+                    isolation_level: IsolationLevel::Container,
+                    ..Default::default()
+                },
+                extensions_schema: None,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn select_uses_requested_backend_hint() {
+        let mut registry = BackendRegistry::new();
+        let docker = make_factory("docker");
+        let podman = make_factory("podman");
+
+        registry.register(&docker);
+        registry.initialize(&docker, &HashMap::new()).await;
+        registry.register(&podman);
+        registry.initialize(&podman, &HashMap::new()).await;
+
+        let ir = SandboxIR {
+            backend_hint: Some("podman".into()),
+            ..SandboxIR::default()
+        };
+
+        let (backend_id, backend) = registry.select(&ir).unwrap();
+        let status = backend.status("sandbox-1").await.unwrap();
+        assert_eq!(backend_id, "podman");
+        assert_eq!(status.backend_id, "podman");
+    }
+}

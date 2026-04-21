@@ -4,9 +4,7 @@ use crate::{
     schema::validate_raw,
     spec::{NetworkSpec, ResourceSpec, RuntimePreset, SandboxSpec, SecretRef, API_VERSION_V1},
 };
-use agentsandbox_sdk::ir::{
-    AuditLevel, EgressIR, EgressMode, SandboxIR, SchedulingPriority,
-};
+use agentsandbox_sdk::ir::{AuditLevel, EgressIR, EgressMode, SandboxIR, SchedulingPriority};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -175,7 +173,11 @@ fn apply_network(ir: &mut SandboxIR, network: Option<NetworkSpec>) -> Result<(),
             validate_hostname(host)?;
         }
         ir.egress = EgressIR {
-            mode: net.egress.mode.map(map_egress_mode).unwrap_or(EgressMode::Proxy),
+            mode: net
+                .egress
+                .mode
+                .map(map_egress_mode)
+                .unwrap_or(EgressMode::Proxy),
             allow_hostnames: net.egress.allow,
             allow_ips: Vec::new(),
             deny_by_default: net.egress.deny_by_default,
@@ -346,6 +348,22 @@ spec:
         assert_eq!(ir.priority, Some(SchedulingPriority::High));
         assert_eq!(ir.audit_level, Some(AuditLevel::Full));
         assert!(ir.metrics_enabled);
+    }
+
+    #[test]
+    fn compile_any_preserves_podman_backend_hint() {
+        let raw = r#"
+apiVersion: sandbox.ai/v1
+kind: Sandbox
+metadata: {}
+spec:
+  runtime:
+    preset: python
+  scheduling:
+    backend: podman
+"#;
+        let ir = compile_any(raw).unwrap();
+        assert_eq!(ir.backend_hint.as_deref(), Some("podman"));
     }
 
     #[test]
@@ -538,7 +556,10 @@ spec:
                \n  network:\n    egress:\n      allow: [\"pypi.org\", \"files.pythonhosted.org\"]\n      denyByDefault: true\n      mode: proxy\n",
         );
         let ir = compile(spec).unwrap();
-        assert_eq!(ir.egress.allow_hostnames, vec!["pypi.org", "files.pythonhosted.org"]);
+        assert_eq!(
+            ir.egress.allow_hostnames,
+            vec!["pypi.org", "files.pythonhosted.org"]
+        );
         assert!(ir.egress.deny_by_default);
         assert_eq!(ir.egress.mode, EgressMode::Proxy);
     }
