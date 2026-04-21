@@ -1,0 +1,22 @@
+Reviewing: sample_code/buggy_script.py
+Using model: claude-sonnet-4-20250514
+--------------------------------------------------
+Requesting review from Claude...
+
+Bugs found (<count>):
+ - <bug 1>
+ - <bug 2>
+ - <bug 3>
+
+Explanation:
+<short explanation from Claude>
+
+Running fixed code inside AgentSandbox...
+
+Sandbox output:
+------------------------------
+3.0
+[2, 3]
+{'host': 'localhost', 'port': '8080'}
+------------------------------
+Execution succeeded (exit 0, <duration-ms>ms)

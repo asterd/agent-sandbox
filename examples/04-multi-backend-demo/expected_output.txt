@@ -1,0 +1,5 @@
+Backend disponibili: docker
+
+OK  docker: agentsandbox multi-backend ok (<duration-ms>ms)
+
+OK  Output identico su tutti i backend.

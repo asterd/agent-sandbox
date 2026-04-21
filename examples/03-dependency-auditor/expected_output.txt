@@ -1,0 +1,20 @@
+Auditing: sample/package.json
+Using model: claude-sonnet-4-20250514
+--------------------------------------------------
+Creating isolated sandbox...
+Installing dependencies inside sandbox...
+Running npm audit...
+Requesting summary from Claude...
+
+Final report
+--------------------------------------------------
+Target: package.json
+Total vulnerabilities: <number>
+Critical: <number>
+High: <number>
+Moderate: <number>
+Low: <number>
+Info: <number>
+
+Claude summary:
+<short Italian summary>

@@ -1,0 +1,5 @@
+Creazione sandbox...
+stdout:    hello from sandbox
+exit_code: 0
+duration:  <duration-ms>ms
+Sandbox distrutta. Done.
