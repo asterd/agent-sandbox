@@ -3,6 +3,7 @@
 Thumbs.db
 .idea/
 .vscode/
+.md/
 
 # Environment and local overrides
 .env
@@ -42,3 +43,7 @@ venv/
 *.sqlite3
 tmp/
 temp/
+
+# Example files
+node_modules/
+package-lock.json
