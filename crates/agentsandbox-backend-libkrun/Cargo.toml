@@ -1,0 +1,19 @@
+[package]
+name = "agentsandbox-backend-libkrun"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+agentsandbox-backend-docker = { path = "../agentsandbox-backend-docker" }
+agentsandbox-backend-podman = { path = "../agentsandbox-backend-podman" }
+agentsandbox-sdk = { path = "../agentsandbox-sdk" }
+async-trait = { workspace = true }
+bollard = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+agentsandbox-conformance = { path = "../agentsandbox-conformance" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

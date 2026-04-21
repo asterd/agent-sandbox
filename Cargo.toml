@@ -1,12 +1,17 @@
 [workspace]
 members = [
+    "crates/agentsandbox-agent",
     "crates/agentsandbox-sdk",
     "crates/agentsandbox-conformance",
     "crates/agentsandbox-core",
     "crates/agentsandbox-daemon",
+    "crates/agentsandbox-backend-bubblewrap",
     "crates/agentsandbox-backend-docker",
     "crates/agentsandbox-backend-gvisor",
+    "crates/agentsandbox-backend-libkrun",
+    "crates/agentsandbox-backend-nsjail",
     "crates/agentsandbox-backend-podman",
+    "crates/agentsandbox-backend-wasmtime",
 ]
 resolver = "2"
 
@@ -34,6 +39,8 @@ chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
 futures = "0.3"
 config = { version = "0.14", features = ["toml", "yaml"] }
+tempfile = "3"
+wasmtime = "18"
 
 [profile.release]
 lto = "thin"

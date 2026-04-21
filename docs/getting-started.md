@@ -107,6 +107,7 @@ Useful references:
 
 - [docs/api-http-v1.md](api-http-v1.md)
 - [docs/spec-v1.md](spec-v1.md)
+- [docs/deployment.md](deployment.md)
 
 ## Operational notes
 

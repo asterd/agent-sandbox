@@ -15,3 +15,18 @@ enabled = ["docker"]
 
 [backends.docker]
 socket = "/var/run/docker.sock"
+
+# [backends.bubblewrap]
+# bwrap_path = "bwrap"
+# rootfs_base = "/tmp/agentsandbox-bubblewrap"
+
+# [backends.nsjail]
+# nsjail_path = "nsjail"
+# chroot_base = "/tmp/agentsandbox-nsjail"
+
+# [backends.wasmtime]
+# python_wasm_path = "./python.wasm"
+
+# [backends.libkrun]
+# socket = "/run/user/1000/podman/podman.sock"
+# runtime = "krun"

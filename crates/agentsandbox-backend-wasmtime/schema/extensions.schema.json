@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Wasmtime Backend Extensions",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "wasmtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "wasmBinary": { "type": "string" },
+        "maxMemoryMb": { "type": "integer" },
+        "preloadedModules": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

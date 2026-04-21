@@ -1532,6 +1532,1573 @@ e riesportarlo, oppure copia il codice (accettabile per ora, refactor dopo Firec
 
 ---
 
+
+
+
+---
+
+## FASE S1 — Backend Bubblewrap
+**Stima: 2 giorni | Linux + macOS**
+**Priorità: Alta — aggiungilo prima di nsjail, Wasmtime e libkrun**
+
+Bubblewrap è il backend da aggiungere subito dopo Docker.
+È il sandbox usato da Claude Code (Linux) e OpenAI Codex (Linux).
+È l'unico backend del progetto che funziona nativamente su macOS senza Docker.
+
+### S1.1 — Perché Bubblewrap risolve un problema reale
+
+Il problema concreto: Docker su macOS gira dentro una VM Linux (Docker Desktop).
+Questo significa 2-4 secondi di overhead per sandbox, 2-3GB di RAM occupati di base,
+e un processo demone sempre in esecuzione. Per uno sviluppatore che lavora su Mac,
+è la principale fonte di friction con il progetto.
+
+Bubblewrap su Linux usa `CLONE_NEWUSER` + namespace per isolare senza root.
+Su macOS usa `sandbox-exec` (Seatbelt) — l'API Apple usata anche da Xcode e Safari.
+
+```
+Linux:  bubblewrap (bwrap) — namespace + seccomp
+macOS:  sandbox-exec (Seatbelt) — policy-based syscall filtering
+```
+
+Il backend AgentSandbox astrae entrambi dietro lo stesso trait.
+
+### S1.2 — Prerequisiti di sistema
+
+```bash
+# Linux — installazione
+sudo apt-get install bubblewrap        # Debian/Ubuntu
+sudo dnf install bubblewrap            # Fedora
+sudo pacman -S bubblewrap              # Arch
+
+# Verifica
+bwrap --version
+# Output atteso: bubblewrap 0.x.x
+
+# macOS — sandbox-exec è preinstallato
+sandbox-exec -n default /bin/echo "ok"
+# Output atteso: ok
+
+# Nota macOS: sandbox-exec è tecnicamente "deprecated" ma
+# Apple non ha rimosso né annunciato rimozione.
+# Claude Code lo usa come backend primario su macOS.
+```
+
+### S1.3 — Crate
+
+```toml
+# crates/agentsandbox-backend-bubblewrap/Cargo.toml
+[package]
+name = "agentsandbox-backend-bubblewrap"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+agentsandbox-sdk = { path = "../agentsandbox-sdk" }
+async-trait      = "0.1"
+tokio            = { version = "1", features = ["full", "process"] }
+serde            = { version = "1", features = ["derive"] }
+serde_json       = "1"
+tracing          = "1"
+uuid             = { version = "1", features = ["v4"] }
+tempfile         = "3"          # per rootfs temporanei
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Nessuna dipendenza extra — bwrap è un binary esterno
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# sandbox-exec è preinstallato su macOS
+
+[dev-dependencies]
+agentsandbox-conformance = { path = "../agentsandbox-conformance" }
+tokio = { version = "1", features = ["full"] }
+```
+
+### S1.4 — Factory
+
+```rust
+// crates/agentsandbox-backend-bubblewrap/src/factory.rs
+
+use agentsandbox_sdk::backend::*;
+use agentsandbox_sdk::error::BackendError;
+use std::collections::HashMap;
+
+pub struct BubblewrapBackendFactory;
+
+impl BackendFactory for BubblewrapBackendFactory {
+    fn describe(&self) -> BackendDescriptor {
+        BackendDescriptor {
+            id: "bubblewrap",
+            display_name: if cfg!(target_os = "macos") {
+                "sandbox-exec (macOS Seatbelt)"
+            } else {
+                "Bubblewrap"
+            },
+            version: env!("CARGO_PKG_VERSION"),
+            trait_version: agentsandbox_sdk::BACKEND_TRAIT_VERSION,
+            capabilities: BackendCapabilities {
+                network_isolation: true,
+                memory_hard_limit: false,   // best-effort su bwrap, no hard limits
+                cpu_hard_limit: false,
+                persistent_storage: false,
+                self_contained: false,      // richiede bwrap nel PATH (Linux)
+                isolation_level: IsolationLevel::Process,
+                supported_presets: vec!["python", "node", "rust", "shell"],
+                rootless: true,             // CLONE_NEWUSER, nessun root richiesto
+                snapshot_restore: false,
+            },
+            extensions_schema: Some(include_str!("../schema/extensions.schema.json")),
+        }
+    }
+
+    fn create(
+        &self,
+        config: &HashMap<String, String>,
+    ) -> Result<Box<dyn SandboxBackend>, BackendError> {
+        // Percorso bwrap — default: cerca nel PATH
+        let bwrap_path = config.get("bwrap_path").cloned()
+            .unwrap_or_else(|| "bwrap".into());
+
+        // Directory base per i rootfs temporanei delle sandbox
+        let rootfs_base = config.get("rootfs_base").cloned()
+            .unwrap_or_else(|| "/tmp/agentsandbox-bwrap".into());
+
+        Ok(Box::new(BubblewrapBackend { bwrap_path, rootfs_base }))
+    }
+}
+```
+
+### S1.5 — Backend Linux (bwrap)
+
+```rust
+// crates/agentsandbox-backend-bubblewrap/src/linux.rs
+
+use agentsandbox_sdk::{backend::*, error::BackendError, ir::SandboxIR};
+use async_trait::async_trait;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+pub struct BubblewrapBackend {
+    pub bwrap_path: String,
+    pub rootfs_base: String,
+    // sandbox_id → stato del processo
+    processes: Arc<Mutex<HashMap<String, SandboxProcess>>>,
+}
+
+struct SandboxProcess {
+    pid: u32,
+    socket_path: String,  // socket UNIX per comunicazione exec
+}
+
+#[async_trait]
+impl SandboxBackend for BubblewrapBackend {
+    async fn health_check(&self) -> Result<(), BackendError> {
+        #[cfg(target_os = "linux")]
+        {
+            let output = tokio::process::Command::new(&self.bwrap_path)
+                .arg("--version")
+                .output()
+                .await
+                .map_err(|_| BackendError::Unavailable(
+                    format!("bwrap non trovato in '{}'", self.bwrap_path)
+                ))?;
+
+            if !output.status.success() {
+                return Err(BackendError::Unavailable(
+                    "bwrap --version ha fallito".into()
+                ));
+            }
+
+            // Verifica che user namespaces siano abilitati
+            let ns_check = std::fs::read_to_string(
+                "/proc/sys/kernel/unprivileged_userns_clone"
+            ).unwrap_or_else(|_| "1".into());
+
+            if ns_check.trim() == "0" {
+                return Err(BackendError::Unavailable(
+                    "user namespaces non abilitati. \
+                     Esegui: sysctl kernel.unprivileged_userns_clone=1".into()
+                ));
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            // sandbox-exec è sempre disponibile su macOS
+            let output = tokio::process::Command::new("sandbox-exec")
+                .arg("-n")
+                .arg("default")
+                .arg("/bin/echo")
+                .arg("healthcheck")
+                .output()
+                .await
+                .map_err(|e| BackendError::Unavailable(
+                    format!("sandbox-exec non disponibile: {}", e)
+                ))?;
+
+            if !output.status.success() {
+                return Err(BackendError::Unavailable(
+                    "sandbox-exec test fallito".into()
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn create(&self, ir: &SandboxIR) -> Result<String, BackendError> {
+        let sandbox_id = ir.id.clone();
+        let socket_path = format!("/tmp/agentsandbox-bwrap-{}.sock", sandbox_id);
+
+        // Costruisce il comando bwrap con le opzioni di isolamento
+        let mut cmd = self.build_bwrap_command(ir, &socket_path)?;
+
+        let child = cmd.spawn()
+            .map_err(|e| BackendError::Internal(
+                format!("spawn bwrap: {}", e)
+            ))?;
+
+        let pid = child.id().ok_or_else(|| BackendError::Internal(
+            "impossibile ottenere PID del processo bwrap".into()
+        ))?;
+
+        // Aspetta che il socket sia pronto (max 3 secondi)
+        for i in 0..30 {
+            if std::path::Path::new(&socket_path).exists() { break; }
+            if i == 29 {
+                return Err(BackendError::Internal(
+                    "timeout attesa socket bwrap".into()
+                ));
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+
+        self.processes.lock().await.insert(
+            sandbox_id.clone(),
+            SandboxProcess { pid, socket_path },
+        );
+
+        Ok(sandbox_id)
+    }
+
+    async fn exec(
+        &self,
+        handle: &str,
+        command: &str,
+        timeout_ms: Option<u64>,
+    ) -> Result<ExecResult, BackendError> {
+        let processes = self.processes.lock().await;
+        let proc = processes.get(handle)
+            .ok_or_else(|| BackendError::NotFound(handle.to_string()))?;
+
+        let socket_path = proc.socket_path.clone();
+        drop(processes); // rilascia il lock prima di operazioni async
+
+        let start = std::time::Instant::now();
+
+        // Invia comando al processo bwrap via socket UNIX
+        // Il processo bwrap esegue un agent minimale in ascolto
+        let request = serde_json::json!({
+            "command": command,
+            "timeout_ms": timeout_ms
+        });
+
+        let result = send_exec_request(&socket_path, &request, timeout_ms).await
+            .map_err(|e| BackendError::Internal(e.to_string()))?;
+
+        Ok(ExecResult {
+            stdout: result["stdout"].as_str().unwrap_or("").to_string(),
+            stderr: result["stderr"].as_str().unwrap_or("").to_string(),
+            exit_code: result["exit_code"].as_i64().unwrap_or(-1),
+            duration_ms: start.elapsed().as_millis() as u64,
+            resource_usage: None,
+        })
+    }
+
+    async fn status(&self, handle: &str) -> Result<SandboxStatus, BackendError> {
+        let processes = self.processes.lock().await;
+
+        if !processes.contains_key(handle) {
+            return Err(BackendError::NotFound(handle.to_string()));
+        }
+
+        let proc = processes.get(handle).unwrap();
+        // Verifica che il processo sia ancora vivo
+        let is_alive = std::path::Path::new(&proc.socket_path).exists();
+
+        let now = chrono::Utc::now();
+        Ok(SandboxStatus {
+            sandbox_id: handle.to_string(),
+            state: if is_alive { SandboxState::Running } else { SandboxState::Stopped },
+            created_at: now,
+            expires_at: now,
+            backend_id: "bubblewrap".into(),
+        })
+    }
+
+    async fn destroy(&self, handle: &str) -> Result<(), BackendError> {
+        let mut processes = self.processes.lock().await;
+
+        if let Some(proc) = processes.remove(handle) {
+            // Kill del processo bwrap (termina tutta la subtree dei processi)
+            let _ = tokio::process::Command::new("kill")
+                .arg("-TERM")
+                .arg(proc.pid.to_string())
+                .output()
+                .await;
+
+            // Cleanup socket
+            let _ = std::fs::remove_file(&proc.socket_path);
+        }
+        // Se non trovato: idempotente, Ok(())
+        Ok(())
+    }
+
+    async fn can_satisfy(&self, ir: &SandboxIR) -> Result<(), BackendError> {
+        if let Some(ext) = &ir.extensions {
+            parse_extensions(ext)?;
+        }
+        Ok(())
+    }
+}
+
+impl BubblewrapBackend {
+    fn build_bwrap_command(
+        &self,
+        ir: &SandboxIR,
+        socket_path: &str,
+    ) -> Result<tokio::process::Command, BackendError> {
+        let mut args: Vec<String> = vec![];
+
+        // Filesystem isolation — monta solo ciò che serve
+        // Il sistema host è read-only, workspace è read-write
+        args.extend([
+            "--ro-bind".into(), "/usr".into(), "/usr".into(),
+            "--ro-bind".into(), "/lib".into(), "/lib".into(),
+            "--ro-bind".into(), "/lib64".into(), "/lib64".into(),
+            "--ro-bind".into(), "/bin".into(), "/bin".into(),
+            "--ro-bind".into(), "/sbin".into(), "/sbin".into(),
+            "--ro-bind".into(), "/etc/resolv.conf".into(), "/etc/resolv.conf".into(),
+            "--proc".into(), "/proc".into(),
+            "--dev".into(), "/dev".into(),
+            "--tmpfs".into(), "/tmp".into(),
+        ]);
+
+        // Workspace read-write
+        let workspace = format!("{}/{}", self.rootfs_base, ir.id);
+        std::fs::create_dir_all(&workspace)
+            .map_err(|e| BackendError::Internal(format!("mkdir workspace: {}", e)))?;
+        args.extend([
+            "--bind".into(), workspace.clone(), ir.working_dir.clone(),
+        ]);
+
+        // Isolamento rete
+        use agentsandbox_sdk::ir::EgressMode;
+        match ir.egress.mode {
+            EgressMode::None => {
+                args.push("--unshare-net".into());
+            }
+            EgressMode::Proxy | EgressMode::Passthrough => {
+                if ir.egress.mode == EgressMode::Passthrough {
+                    tracing::warn!(
+                        sandbox_id = %ir.id,
+                        "egress mode=passthrough su bwrap: nessun filtro"
+                    );
+                }
+                // Con proxy: la rete è disponibile ma filtrata dall'egress proxy
+                // Il container usa HTTP_PROXY=socks5://... come Docker
+            }
+        }
+
+        // Isolamento PID e hostname
+        args.extend([
+            "--unshare-pid".into(),
+            "--unshare-uts".into(),
+            "--hostname".into(), format!("sandbox-{}", &ir.id[..8]),
+            "--die-with-parent".into(), // fondamentale: termina se il daemon termina
+        ]);
+
+        // Variabili d'ambiente
+        for (k, v) in ir.env.iter().chain(ir.secret_env.iter()) {
+            args.extend(["--setenv".into(), k.clone(), v.clone()]);
+        }
+
+        // Aggiungi socket path come env per l'agent interno
+        args.extend([
+            "--setenv".into(),
+            "AGENTSANDBOX_SOCKET".into(),
+            socket_path.to_string(),
+        ]);
+
+        // Il processo eseguito: agent minimale che ascolta sul socket
+        // (stesso concetto del guest agent Firecracker, ma molto più semplice)
+        args.extend([
+            "--".into(),
+            // Agent embeddato: un binary Rust minimale compilato nel crate
+            // che ascolta su AGENTSANDBOX_SOCKET e esegue i comandi ricevuti
+            "/path/to/agentsandbox-agent".into(),
+        ]);
+
+        let mut cmd = tokio::process::Command::new(&self.bwrap_path);
+        cmd.args(&args);
+        Ok(cmd)
+    }
+}
+
+// Helper per comunicazione via socket UNIX
+async fn send_exec_request(
+    socket_path: &str,
+    request: &serde_json::Value,
+    timeout_ms: Option<u64>,
+) -> anyhow::Result<serde_json::Value> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket_path).await?;
+
+    let payload = serde_json::to_string(request)? + "\n";
+    stream.write_all(payload.as_bytes()).await?;
+
+    let mut response = String::new();
+    let timeout = timeout_ms.unwrap_or(30_000);
+
+    tokio::time::timeout(
+        tokio::time::Duration::from_millis(timeout),
+        async {
+            let mut buf = [0u8; 65536];
+            loop {
+                let n = stream.read(&mut buf).await?;
+                if n == 0 { break; }
+                response.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if response.contains('\n') { break; }
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+    ).await??;
+
+    Ok(serde_json::from_str(response.trim())?)
+}
+
+fn parse_extensions(ext: &serde_json::Value) -> Result<BwrapExtensions, BackendError> {
+    let section = ext.get("bubblewrap").cloned().unwrap_or_default();
+    serde_json::from_value::<BwrapExtensions>(section)
+        .map_err(|e| BackendError::Configuration(
+            format!("extensions.bubblewrap non valide: {}", e)
+        ))
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BwrapExtensions {
+    /// Mount aggiuntivi read-only: ["/host/path", "/container/path"]
+    ro_binds: Option<Vec<[String; 2]>>,
+    /// Mount aggiuntivi read-write: ["/host/path", "/container/path"]
+    rw_binds: Option<Vec<[String; 2]>>,
+    /// Abilita mount /dev/nvidia* per GPU
+    gpu_access: Option<bool>,
+    /// Argomenti bwrap aggiuntivi (raw, avanzato)
+    extra_args: Option<Vec<String>>,
+}
+```
+
+### S1.6 — Extensions schema
+
+```json
+// crates/agentsandbox-backend-bubblewrap/schema/extensions.schema.json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Bubblewrap Backend Extensions",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "bubblewrap": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "roBind": {
+          "type": "array",
+          "description": "Mount read-only aggiuntivi [[hostPath, containerPath]]",
+          "items": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 2, "maxItems": 2
+          }
+        },
+        "rwBind": {
+          "type": "array",
+          "description": "Mount read-write aggiuntivi [[hostPath, containerPath]]",
+          "items": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 2, "maxItems": 2
+          }
+        },
+        "gpuAccess": {
+          "type": "boolean",
+          "description": "Monta /dev/nvidia* per accesso GPU"
+        }
+      }
+    }
+  }
+}
+```
+
+### S1.7 — Configurazione daemon
+
+```toml
+# agentsandbox.toml — aggiungi:
+[backends]
+enabled = ["docker", "bubblewrap"]
+
+[backends.bubblewrap]
+# bwrap_path = "/usr/bin/bwrap"    # default: cerca nel PATH
+# rootfs_base = "/tmp/agentsandbox-bwrap"  # workspace temporanei
+```
+
+### S1.8 — Aggiunta al daemon main.rs
+
+```rust
+// In main.rs, nel match sui backend abilitati:
+"bubblewrap" => {
+    let factory = agentsandbox_backend_bubblewrap::BubblewrapBackendFactory;
+    registry.register(&factory);
+    registry.initialize(&factory, &backend_config).await;
+}
+```
+
+### S1.9 — Conformance test
+
+```rust
+// crates/agentsandbox-backend-bubblewrap/tests/conformance.rs
+use agentsandbox_backend_bubblewrap::BubblewrapBackendFactory;
+use agentsandbox_sdk::backend::BackendFactory;
+use std::collections::HashMap;
+
+async fn make_backend() -> Box<dyn agentsandbox_sdk::backend::SandboxBackend> {
+    BubblewrapBackendFactory.create(&HashMap::new())
+        .expect("bwrap deve essere disponibile per i test")
+}
+
+agentsandbox_conformance::run_conformance_suite!(make_backend);
+```
+
+### S1.10 — Criteri di completamento
+
+- [ ] Conformance suite passa su Linux con `bwrap` nel PATH
+- [ ] Conformance suite passa su macOS (via `sandbox-exec`)
+- [ ] `health_check()` ritorna messaggio chiaro se bwrap non è installato
+- [ ] `--die-with-parent` verificato: kill del daemon → kill automatico delle sandbox
+- [ ] `scheduling.backend: bubblewrap` funziona nella spec
+- [ ] I workspace temporanei in `/tmp` vengono rimossi dopo `destroy()`
+
+---
+
+## FASE S2 — Backend nsjail
+**Stima: 2 giorni | Solo Linux**
+**Use case: ambienti server e CI con requisiti di isolamento syscall-level**
+
+nsjail è un tool Google per isolamento dei processi che usa namespace Linux,
+seccomp-bpf e cgroups. È usato internamente da Google e da Windmill in produzione.
+Più configurabile di Bubblewrap, ottimo per CI dove si vuole controllo fine sui syscall.
+
+### S2.1 — Prerequisiti
+
+```bash
+# nsjail richiede build from source (non è nei repo standard)
+git clone https://github.com/google/nsjail
+cd nsjail
+make
+sudo cp nsjail /usr/local/bin/
+
+# Oppure via Docker nell'immagine CI
+docker pull gcr.io/google.com/cloudsdktool/cloud-sdk:latest
+
+# Verifica
+nsjail --version
+```
+
+### S2.2 — Differenza chiave da Bubblewrap
+
+```
+Bubblewrap: isolamento via mount namespaces + user namespaces
+            → ideale per sviluppo locale, macOS, workstation
+            → no filtri syscall avanzati
+
+nsjail:     isolamento via namespace + seccomp-bpf + cgroups
+            → ideale per server, CI, ambienti multi-tenant
+            → filtri syscall configurabili per policy
+            → network isolation più granulare (per-port)
+```
+
+### S2.3 — Crate
+
+```toml
+# crates/agentsandbox-backend-nsjail/Cargo.toml
+[package]
+name = "agentsandbox-backend-nsjail"
+version = "0.1.0"
+
+[dependencies]
+agentsandbox-sdk = { path = "../agentsandbox-sdk" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["full", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "1"
+prost = "0.12"    # nsjail usa protobuf per la configurazione
+
+[dev-dependencies]
+agentsandbox-conformance = { path = "../agentsandbox-conformance" }
+```
+
+### S2.4 — Factory e Backend
+
+```rust
+// crates/agentsandbox-backend-nsjail/src/lib.rs
+
+use agentsandbox_sdk::{backend::*, error::BackendError, ir::*};
+use async_trait::async_trait;
+use std::collections::HashMap;
+
+pub struct NsjailBackendFactory;
+
+impl BackendFactory for NsjailBackendFactory {
+    fn describe(&self) -> BackendDescriptor {
+        BackendDescriptor {
+            id: "nsjail",
+            display_name: "nsjail (Google)",
+            version: env!("CARGO_PKG_VERSION"),
+            trait_version: agentsandbox_sdk::BACKEND_TRAIT_VERSION,
+            capabilities: BackendCapabilities {
+                network_isolation: true,
+                memory_hard_limit: true,    // via cgroups
+                cpu_hard_limit: true,       // via cgroups
+                persistent_storage: false,
+                self_contained: false,
+                isolation_level: IsolationLevel::Process,
+                supported_presets: vec!["python", "node", "rust", "shell"],
+                rootless: false,            // richiede alcune capability o root
+                snapshot_restore: false,
+            },
+            extensions_schema: Some(include_str!("../schema/extensions.schema.json")),
+        }
+    }
+
+    fn create(&self, config: &HashMap<String, String>) -> Result<Box<dyn SandboxBackend>, BackendError> {
+        let nsjail_path = config.get("nsjail_path").cloned()
+            .unwrap_or_else(|| "nsjail".into());
+        let chroot_base = config.get("chroot_base").cloned()
+            .unwrap_or_else(|| "/tmp/agentsandbox-nsjail".into());
+
+        Ok(Box::new(NsjailBackend { nsjail_path, chroot_base }))
+    }
+}
+
+pub struct NsjailBackend {
+    nsjail_path: String,
+    chroot_base: String,
+}
+
+#[async_trait]
+impl SandboxBackend for NsjailBackend {
+    async fn health_check(&self) -> Result<(), BackendError> {
+        let output = tokio::process::Command::new(&self.nsjail_path)
+            .arg("--help")
+            .output()
+            .await
+            .map_err(|_| BackendError::Unavailable(
+                format!(
+                    "nsjail non trovato in '{}'. \
+                     Build from source: https://github.com/google/nsjail",
+                    self.nsjail_path
+                )
+            ))?;
+
+        // nsjail --help esce con codice != 0 ma stampa usage, è ok
+        if output.stdout.is_empty() && output.stderr.is_empty() {
+            return Err(BackendError::Unavailable("nsjail non risponde".into()));
+        }
+
+        Ok(())
+    }
+
+    async fn create(&self, ir: &SandboxIR) -> Result<String, BackendError> {
+        let id = ir.id.clone();
+        let chroot = format!("{}/{}", self.chroot_base, id);
+        let socket = format!("/tmp/agentsandbox-nsjail-{}.sock", id);
+
+        // Prepara il chroot minimale
+        self.prepare_chroot(&chroot, ir).await?;
+
+        let mut cmd = tokio::process::Command::new(&self.nsjail_path);
+        cmd
+            // Modalità: one-shot con processo persistente (listen mode)
+            .arg("--mode").arg("l")  // listen mode per exec multipli
+            .arg("--chroot").arg(&chroot)
+            .arg("--user").arg("65534")   // nobody
+            .arg("--group").arg("65534")
+            .arg("--time_limit").arg(ir.ttl_seconds.to_string())
+            // Limiti risorse
+            .arg("--rlimit_as").arg((ir.memory_mb * 2).to_string()) // virtual memory
+            .arg("--rlimit_cpu").arg(
+                (ir.cpu_millicores / 1000).max(1).to_string()
+            )
+            // Isolamento rete
+            .arg(if matches!(ir.egress.mode, EgressMode::None) {
+                "--disable_proc_net"
+            } else {
+                "--iface_no_lo" // placeholder — rete abilitata
+            })
+            // Socket per comunicazione
+            .arg("--bindmount_ro").arg(format!("{}:{}", socket, socket))
+            // Env
+            .args(ir.env.iter().chain(ir.secret_env.iter())
+                .flat_map(|(k, v)| ["--env".to_string(), format!("{}={}", k, v)])
+            )
+            .arg("--")
+            .arg("/usr/local/bin/agentsandbox-agent"); // agent nel chroot
+
+        cmd.spawn()
+            .map_err(|e| BackendError::Internal(format!("spawn nsjail: {}", e)))?;
+
+        Ok(id)
+    }
+
+    async fn exec(
+        &self,
+        handle: &str,
+        command: &str,
+        timeout_ms: Option<u64>,
+    ) -> Result<ExecResult, BackendError> {
+        // Stessa comunicazione via socket UNIX dell'agent interno
+        // (identica a Bubblewrap — estrai in helper condiviso)
+        let socket = format!("/tmp/agentsandbox-nsjail-{}.sock", handle);
+        let start = std::time::Instant::now();
+
+        let request = serde_json::json!({ "command": command, "timeout_ms": timeout_ms });
+        let result = send_to_agent(&socket, &request, timeout_ms).await
+            .map_err(|e| BackendError::Internal(e.to_string()))?;
+
+        Ok(ExecResult {
+            stdout: result["stdout"].as_str().unwrap_or("").to_string(),
+            stderr: result["stderr"].as_str().unwrap_or("").to_string(),
+            exit_code: result["exit_code"].as_i64().unwrap_or(-1),
+            duration_ms: start.elapsed().as_millis() as u64,
+            resource_usage: None,
+        })
+    }
+
+    async fn status(&self, handle: &str) -> Result<SandboxStatus, BackendError> {
+        let socket = format!("/tmp/agentsandbox-nsjail-{}.sock", handle);
+        let alive = std::path::Path::new(&socket).exists();
+        let now = chrono::Utc::now();
+        Ok(SandboxStatus {
+            sandbox_id: handle.to_string(),
+            state: if alive { SandboxState::Running } else { SandboxState::Stopped },
+            created_at: now,
+            expires_at: now,
+            backend_id: "nsjail".into(),
+        })
+    }
+
+    async fn destroy(&self, handle: &str) -> Result<(), BackendError> {
+        let socket = format!("/tmp/agentsandbox-nsjail-{}.sock", handle);
+        let chroot = format!("{}/{}", self.chroot_base, handle);
+        // Kill del processo nsjail tramite socket o pkill
+        let _ = tokio::process::Command::new("pkill")
+            .arg("-f")
+            .arg(format!("nsjail.*{}", handle))
+            .output()
+            .await;
+        let _ = std::fs::remove_file(&socket);
+        let _ = std::fs::remove_dir_all(&chroot);
+        Ok(())
+    }
+}
+
+impl NsjailBackend {
+    async fn prepare_chroot(
+        &self,
+        chroot: &str,
+        ir: &SandboxIR,
+    ) -> Result<(), BackendError> {
+        // Crea struttura chroot minimale con i binari necessari
+        // In produzione: usa un rootfs prebuilt per preset (come Firecracker)
+        // Per ora: symlinks al sistema host
+        std::fs::create_dir_all(chroot)
+            .map_err(|e| BackendError::Internal(e.to_string()))?;
+        Ok(())
+    }
+}
+
+async fn send_to_agent(
+    socket: &str,
+    request: &serde_json::Value,
+    timeout_ms: Option<u64>,
+) -> anyhow::Result<serde_json::Value> {
+    // Identico a Bubblewrap — candidato per crate condiviso `agentsandbox-agent-client`
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket).await?;
+    let payload = serde_json::to_string(request)? + "\n";
+    stream.write_all(payload.as_bytes()).await?;
+
+    let timeout = timeout_ms.unwrap_or(30_000);
+    let mut response = String::new();
+    tokio::time::timeout(
+        tokio::time::Duration::from_millis(timeout),
+        async {
+            let mut buf = [0u8; 65536];
+            loop {
+                let n = stream.read(&mut buf).await?;
+                if n == 0 { break; }
+                response.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if response.contains('\n') { break; }
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+    ).await??;
+
+    Ok(serde_json::from_str(response.trim())?)
+}
+```
+
+### S2.5 — Extensions schema nsjail
+
+```json
+// crates/agentsandbox-backend-nsjail/schema/extensions.schema.json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "nsjail Backend Extensions",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "nsjail": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "seccompPolicy": {
+          "type": "string",
+          "description": "Policy seccomp-bpf inline (sintassi Kafel). Es: 'ALLOW { read, write, open } DEFAULT KILL'"
+        },
+        "rlimitNofile": {
+          "type": "integer",
+          "description": "Limite file descriptor aperti"
+        },
+        "rlimitNproc": {
+          "type": "integer",
+          "description": "Limite processi figli"
+        },
+        "bindmountRo": {
+          "type": "array",
+          "description": "Mount read-only aggiuntivi [hostPath:containerPath]",
+          "items": { "type": "string" }
+        },
+        "cgroupMemMax": {
+          "type": "integer",
+          "description": "Limite memoria cgroup in MB (override di resources.memoryMb)"
+        }
+      }
+    }
+  }
+}
+```
+
+### S2.6 — Nota importante su rootless
+
+nsjail richiede alcune Linux capabilities che non tutti gli ambienti concedono.
+Documenta esplicitamente in `docs/backends/nsjail.md`:
+
+```markdown
+## nsjail e privilegi
+
+nsjail in modalità rootless richiede che user namespaces siano abilitati:
+  sysctl kernel.unprivileged_userns_clone=1
+
+In alcuni ambienti hardened (Debian con kernel 5.x default, alcuni VPS)
+i user namespaces non-root sono disabilitati per sicurezza.
+In questo caso nsjail richiede root o capabilities specifiche (CAP_SYS_ADMIN).
+
+Alternativa senza root: usa il backend Bubblewrap, che è progettato
+specificamente per operare senza privilegi.
+```
+
+### S2.7 — Criteri di completamento
+
+- [ ] Conformance suite passa su Linux con nsjail nel PATH
+- [ ] `health_check()` ritorna Unavailable su macOS con messaggio esplicito
+- [ ] `--time_limit` viene rispettato (test: comando `sleep 1000` con TTL 5s)
+- [ ] I chroot temporanei vengono rimossi dopo `destroy()`
+- [ ] `scheduling.backend: nsjail` funziona nella spec
+
+---
+
+## FASE S3 — Backend Wasmtime
+**Stima: 3 giorni | Linux + macOS + Windows**
+**Use case: esecuzione ultra-leggera di codice deterministico, zero dipendenze sistema**
+
+Wasmtime è il backend più portabile: funziona su qualsiasi sistema operativo,
+non richiede Docker, root o nessun daemon. Il trade-off è che supporta solo
+codice che può essere compilato in WebAssembly — ottimo per tool leggeri,
+limitato per ambienti Python completi con pip install.
+
+### S3.1 — Posizionamento corretto
+
+```
+Wasmtime NON è un sostituto di Docker o Bubblewrap per uso generale.
+Wasmtime È il backend giusto per:
+  - Eseguire script Python semplici (via Pyodide/python.wasm)
+  - Eseguire JavaScript/TypeScript (via QuickJS.wasm)
+  - Eseguire tool WASM compilati (Rust → wasm32-wasip2)
+  - Ambienti dove Docker non è disponibile e non si vuole root
+
+Limite principale: pip install di pacchetti con estensioni C (numpy, scipy)
+NON funziona in Wasmtime senza wheel WASM precompilate.
+Questo va documentato esplicitamente, non nascosto.
+```
+
+### S3.2 — Prerequisiti
+
+```bash
+# Wasmtime è una libreria Rust — nessun binary esterno richiesto
+# Si aggiunge come dipendenza Cargo
+
+# Per Python via WASM, serve il binary python.wasm
+# Disponibile da: https://github.com/vmware-labs/webassembly-language-runtimes
+curl -LO https://github.com/vmware-labs/webassembly-language-runtimes/releases/download/python%2F3.12.0%2B20231211-040d5a6/python-3.12.0.wasm
+```
+
+### S3.3 — Crate
+
+```toml
+# crates/agentsandbox-backend-wasmtime/Cargo.toml
+[package]
+name = "agentsandbox-backend-wasmtime"
+version = "0.1.0"
+
+[dependencies]
+agentsandbox-sdk = { path = "../agentsandbox-sdk" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "1"
+wasmtime = "18"
+wasmtime-wasi = "18"
+cap-std = "3"       # per WASI capabilities
+```
+
+### S3.4 — Backend
+
+```rust
+// crates/agentsandbox-backend-wasmtime/src/lib.rs
+
+use agentsandbox_sdk::{backend::*, error::BackendError, ir::*};
+use async_trait::async_trait;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use wasmtime::*;
+use wasmtime_wasi::{WasiCtxBuilder, WasiView};
+
+pub struct WasmtimeBackendFactory;
+
+impl BackendFactory for WasmtimeBackendFactory {
+    fn describe(&self) -> BackendDescriptor {
+        BackendDescriptor {
+            id: "wasmtime",
+            display_name: "Wasmtime (WebAssembly)",
+            version: env!("CARGO_PKG_VERSION"),
+            trait_version: agentsandbox_sdk::BACKEND_TRAIT_VERSION,
+            capabilities: BackendCapabilities {
+                network_isolation: true,    // deny-by-default WASI
+                memory_hard_limit: true,    // Wasmtime ha hard limits sulla linear memory
+                cpu_hard_limit: true,       // epoch interruption
+                persistent_storage: false,
+                self_contained: true,       // nessun binary esterno richiesto
+                isolation_level: IsolationLevel::Process,
+                supported_presets: vec!["python", "node"],
+                // IMPORTANTE: python support è limitato (no pip install di C extensions)
+                rootless: true,
+                snapshot_restore: false,
+            },
+            extensions_schema: Some(include_str!("../schema/extensions.schema.json")),
+        }
+    }
+
+    fn create(&self, config: &HashMap<String, String>) -> Result<Box<dyn SandboxBackend>, BackendError> {
+        let python_wasm = config.get("python_wasm_path").cloned()
+            .unwrap_or_else(|| "./python.wasm".into());
+        let node_wasm = config.get("node_wasm_path").cloned()
+            .unwrap_or_default();
+
+        // Precompila il modulo WASM a startup (AoT) — salva tempo a runtime
+        let engine = Engine::new(Config::new().epoch_interruption(true))
+            .map_err(|e| BackendError::Configuration(format!("wasmtime engine: {}", e)))?;
+
+        let python_module = if std::path::Path::new(&python_wasm).exists() {
+            Some(unsafe {
+                Module::from_file(&engine, &python_wasm)
+                    .map_err(|e| BackendError::Configuration(
+                        format!("caricamento python.wasm: {}", e)
+                    ))?
+            })
+        } else {
+            tracing::warn!("python.wasm non trovato in '{}' — preset python non disponibile", python_wasm);
+            None
+        };
+
+        Ok(Box::new(WasmtimeBackend {
+            engine,
+            python_module,
+            workspaces: Arc::new(Mutex::new(HashMap::new())),
+        }))
+    }
+}
+
+pub struct WasmtimeBackend {
+    engine: Engine,
+    python_module: Option<Module>,
+    // sandbox_id → workspace dir (dati persistenti per la durata della sandbox)
+    workspaces: Arc<Mutex<HashMap<String, PathBuf>>>,
+}
+
+#[async_trait]
+impl SandboxBackend for WasmtimeBackend {
+    async fn health_check(&self) -> Result<(), BackendError> {
+        // Wasmtime è una libreria — se compila, è disponibile
+        // Verifica che almeno python.wasm sia caricabile
+        if self.python_module.is_none() {
+            tracing::warn!(
+                "backend wasmtime: python.wasm non caricato — \
+                 solo preset con WASM custom sono disponibili"
+            );
+        }
+        Ok(())
+    }
+
+    async fn create(&self, ir: &SandboxIR) -> Result<String, BackendError> {
+        let workspace = tempfile::tempdir()
+            .map_err(|e| BackendError::Internal(e.to_string()))?;
+
+        let path = workspace.path().to_path_buf();
+        // Non droppiamo tempdir subito — la teniamo per la durata della sandbox
+        // In produzione: usa una directory permanente con cleanup manuale
+        std::mem::forget(workspace);
+
+        self.workspaces.lock().await.insert(ir.id.clone(), path);
+        Ok(ir.id.clone())
+    }
+
+    async fn exec(
+        &self,
+        handle: &str,
+        command: &str,
+        timeout_ms: Option<u64>,
+    ) -> Result<ExecResult, BackendError> {
+        let workspaces = self.workspaces.lock().await;
+        let workspace = workspaces.get(handle)
+            .ok_or_else(|| BackendError::NotFound(handle.to_string()))?
+            .clone();
+        drop(workspaces);
+
+        let module = self.python_module.as_ref()
+            .ok_or_else(|| BackendError::NotSupported(
+                "python.wasm non caricato. Specifica python_wasm_path nella configurazione".into()
+            ))?
+            .clone();
+
+        let engine = self.engine.clone();
+        let timeout = timeout_ms.unwrap_or(30_000);
+        let command = command.to_string();
+
+        // Esegui in un thread separato (Wasmtime non è Send in alcuni contesti)
+        let result = tokio::task::spawn_blocking(move || {
+            run_wasm_command(&engine, &module, &workspace, &command, timeout)
+        }).await
+        .map_err(|e| BackendError::Internal(e.to_string()))?
+        .map_err(|e| BackendError::Internal(e.to_string()))?;
+
+        Ok(result)
+    }
+
+    async fn status(&self, handle: &str) -> Result<SandboxStatus, BackendError> {
+        let exists = self.workspaces.lock().await.contains_key(handle);
+        if !exists {
+            return Err(BackendError::NotFound(handle.to_string()));
+        }
+        let now = chrono::Utc::now();
+        Ok(SandboxStatus {
+            sandbox_id: handle.to_string(),
+            state: SandboxState::Running,
+            created_at: now,
+            expires_at: now,
+            backend_id: "wasmtime".into(),
+        })
+    }
+
+    async fn destroy(&self, handle: &str) -> Result<(), BackendError> {
+        if let Some(workspace) = self.workspaces.lock().await.remove(handle) {
+            let _ = std::fs::remove_dir_all(workspace);
+        }
+        Ok(())
+    }
+}
+
+fn run_wasm_command(
+    engine: &Engine,
+    module: &Module,
+    workspace: &std::path::Path,
+    command: &str,
+    timeout_ms: u64,
+) -> anyhow::Result<ExecResult> {
+    use wasmtime_wasi::{pipe::MemoryOutputPipe, WasiCtxBuilder};
+
+    let stdout_pipe = MemoryOutputPipe::new(1024 * 1024); // max 1MB output
+    let stderr_pipe = MemoryOutputPipe::new(1024 * 1024);
+
+    let wasi = WasiCtxBuilder::new()
+        // Passa il comando come argv[1]
+        .args(&["python", "-c", command])?
+        // Filesystem: solo il workspace è scrivibile
+        .preopened_dir(workspace, "/workspace", wasmtime_wasi::DirPerms::all(), wasmtime_wasi::FilePerms::all())?
+        // Output catturato
+        .stdout(stdout_pipe.clone())
+        .stderr(stderr_pipe.clone())
+        // Rete: deny-by-default in WASI (non serve configurazione aggiuntiva)
+        .build();
+
+    let mut store = Store::new(engine, wasi);
+
+    // Epoch-based timeout
+    engine.increment_epoch();
+    store.set_epoch_deadline(timeout_ms / 10); // epoch tick ogni ~10ms
+    store.epoch_deadline_trap();
+
+    let start = std::time::Instant::now();
+
+    let linker = wasmtime::component::Linker::new(engine);
+    // TODO: setup WASI preview2 linker
+    // Esecuzione semplificata — implementazione completa richiede setup WASI p2
+
+    let exit_code = 0i64; // placeholder
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    let stdout = String::from_utf8_lossy(&stdout_pipe.contents()).to_string();
+    let stderr = String::from_utf8_lossy(&stderr_pipe.contents()).to_string();
+
+    Ok(ExecResult {
+        stdout,
+        stderr,
+        exit_code,
+        duration_ms,
+        resource_usage: None,
+    })
+}
+```
+
+### S3.5 — Extensions schema Wasmtime
+
+```json
+// crates/agentsandbox-backend-wasmtime/schema/extensions.schema.json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Wasmtime Backend Extensions",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "wasmtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "wasmBinary": {
+          "type": "string",
+          "description": "Path al binary WASM custom da eseguire (override del preset)"
+        },
+        "maxMemoryMb": {
+          "type": "integer",
+          "description": "Limite memoria linear memory WebAssembly in MB"
+        },
+        "preloadedModules": {
+          "type": "array",
+          "description": "Moduli WASM aggiuntivi da caricare nel linker",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}
+```
+
+### S3.6 — Limite documentato (obbligatorio)
+
+```markdown
+# docs/backends/wasmtime.md
+
+## Limiti del backend Wasmtime
+
+**Cosa funziona:**
+- Script Python puri (stdlib only): `print`, `math`, `json`, `re`, `datetime`
+- JavaScript via QuickJS.wasm
+- Binary Rust compilati per `wasm32-wasip2`
+
+**Cosa NON funziona:**
+- `pip install numpy` — numpy ha estensioni C, non compilabile in WASM
+- `pip install requests` — la versione pura funziona, ma SSL non è disponibile
+- Qualsiasi libreria Python con binding C/C++ nativi
+- Fork di processi (`subprocess`, `multiprocessing`)
+
+**Quando usare Wasmtime:**
+- Hai codice Python semplice senza dipendenze esterne
+- Vuoi il backend più leggero possibile (zero Docker, zero root)
+- Stai eseguendo tool custom già compilati in WASM
+
+**Quando NON usare Wasmtime:**
+- Il codice usa `pip install` per dipendenze non-pure-Python
+- Hai bisogno di accesso rete reale (non solo hostname whitelist)
+- Stai eseguendo script di sistema o shell commands complessi
+
+Per questi casi, usa il backend Docker o Bubblewrap.
+```
+
+### S3.7 — Criteri di completamento
+
+- [ ] Conformance suite passa (nota: exec test usa solo comandi sh/echo, non Python)
+- [ ] `health_check()` passa senza python.wasm con solo un warning
+- [ ] Script Python puro funziona: `python -c 'print(1+1)'`
+- [ ] Timeout rispettato tramite epoch interruption
+- [ ] `docs/backends/wasmtime.md` include la sezione limiti prima delle istruzioni
+
+---
+
+## FASE S4 — Backend libkrun
+**Stima: 3-4 giorni | Solo Linux + KVM**
+**Use case: alternativa a Firecracker più semplice da integrare**
+
+libkrun è una libreria Rust (non un binary) che crea microVM leggere via KVM.
+È il backend che Podman usa per il suo `--runtime=krun` mode.
+Rispetto a Firecracker: API più semplice, nessun jailer, ma meno configurabile.
+
+### S4.1 — Confronto con Firecracker
+
+```
+Firecracker:
+  + Più maturo e documentato
+  + Usato in produzione da AWS Lambda
+  + Maggiore controllo su ogni aspetto della VM
+  - Richiede jailer per sicurezza completa
+  - Configurazione più complessa
+  - Binary separato da gestire
+
+libkrun:
+  + Libreria Rust — nessun binary esterno
+  + API molto più semplice
+  + Già integrato in Podman
+  + Startup comparabile (< 200ms)
+  - Meno documentato
+  - Meno configurabile
+  - Comunità più piccola
+```
+
+### S4.2 — Prerequisiti
+
+```bash
+# libkrun richiede KVM e le stesse condizioni di Firecracker
+ls /dev/kvm   # deve esistere
+
+# La libreria si aggiunge come dipendenza Cargo
+# (disponibile su crates.io come `krun`)
+```
+
+### S4.3 — Crate
+
+```toml
+# crates/agentsandbox-backend-libkrun/Cargo.toml
+[package]
+name = "agentsandbox-backend-libkrun"
+version = "0.1.0"
+
+[dependencies]
+agentsandbox-sdk = { path = "../agentsandbox-sdk" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "1"
+# Bindings alla libreria libkrun
+# NOTA: krun crate è sperimentale — valuta se dipendere dal binary
+# o dai bindings Rust diretti
+krun = "0.1"   # o syscall diretti via libloading
+```
+
+### S4.4 — Factory e Backend (scheletro)
+
+```rust
+// crates/agentsandbox-backend-libkrun/src/lib.rs
+
+use agentsandbox_sdk::{backend::*, error::BackendError, ir::*};
+use async_trait::async_trait;
+use std::collections::HashMap;
+
+pub struct LibkrunBackendFactory;
+
+impl BackendFactory for LibkrunBackendFactory {
+    fn describe(&self) -> BackendDescriptor {
+        BackendDescriptor {
+            id: "libkrun",
+            display_name: "libkrun MicroVM",
+            version: env!("CARGO_PKG_VERSION"),
+            trait_version: agentsandbox_sdk::BACKEND_TRAIT_VERSION,
+            capabilities: BackendCapabilities {
+                network_isolation: true,
+                memory_hard_limit: true,
+                cpu_hard_limit: true,
+                persistent_storage: false,
+                self_contained: true,   // libreria, nessun binary esterno
+                isolation_level: IsolationLevel::MicroVM,
+                supported_presets: vec!["python", "node", "shell"],
+                rootless: false,        // richiede KVM
+                snapshot_restore: false,
+            },
+            extensions_schema: Some(include_str!("../schema/extensions.schema.json")),
+        }
+    }
+
+    fn create(&self, config: &HashMap<String, String>) -> Result<Box<dyn SandboxBackend>, BackendError> {
+        let rootfs_dir = config.get("rootfs_dir").cloned()
+            .ok_or_else(|| BackendError::Configuration("rootfs_dir richiesto".into()))?;
+
+        Ok(Box::new(LibkrunBackend { rootfs_dir }))
+    }
+}
+
+pub struct LibkrunBackend {
+    rootfs_dir: String,
+}
+
+#[async_trait]
+impl SandboxBackend for LibkrunBackend {
+    async fn health_check(&self) -> Result<(), BackendError> {
+        // Stessa logica di Firecracker: verifica KVM
+        if !std::path::Path::new("/dev/kvm").exists() {
+            return Err(BackendError::Unavailable(
+                "/dev/kvm non trovato. libkrun richiede KVM. \
+                 Non supportato su macOS, VPS senza nested virtualization."
+                    .into()
+            ));
+        }
+
+        // Verifica che il rootfs base esista
+        if !std::path::Path::new(&self.rootfs_dir).exists() {
+            return Err(BackendError::Configuration(
+                format!("rootfs_dir non trovato: {}", self.rootfs_dir)
+            ));
+        }
+
+        Ok(())
+    }
+
+    async fn create(&self, ir: &SandboxIR) -> Result<String, BackendError> {
+        // libkrun API:
+        // 1. krun_create_ctx() → ctx_id
+        // 2. krun_set_vm_config(ctx_id, num_vcpus, ram_mib)
+        // 3. krun_set_root(ctx_id, rootfs_path)
+        // 4. krun_set_workdir(ctx_id, working_dir)
+        // 5. krun_set_env(ctx_id, env_list)
+        // 6. krun_start_enter(ctx_id) → avvia la VM
+        // La VM condivide il filesystem host (virtio-fs) — più semplice di Firecracker
+        todo!("implementa via krun crate o FFI diretta a libkrun")
+    }
+
+    async fn exec(
+        &self,
+        handle: &str,
+        command: &str,
+        timeout_ms: Option<u64>,
+    ) -> Result<ExecResult, BackendError> {
+        // libkrun usa vsock come Firecracker
+        // Stessa implementazione del guest agent
+        todo!()
+    }
+
+    async fn status(&self, handle: &str) -> Result<SandboxStatus, BackendError> {
+        todo!()
+    }
+
+    async fn destroy(&self, handle: &str) -> Result<(), BackendError> {
+        // krun_free_ctx(ctx_id)
+        todo!()
+    }
+}
+```
+
+### S4.5 — Nota onesta su libkrun
+
+Il crate `krun` su crates.io è sperimentale. Se i bindings non sono stabili
+al momento dell'implementazione, l'alternativa pratica è:
+
+1. **Implementa come Podman + krun runtime**: se Podman è installato con supporto libkrun,
+   puoi usare il backend Podman con `--runtime=krun` via extensions. Zero codice aggiuntivo.
+   Aggiungi nella documentazione come variante del backend Podman.
+
+2. **FFI diretta a libkrun.so**: più lavoro ma stabile — libkrun espone una C API.
+
+Valuta al momento dell'implementazione quale dei due approcci è più pratico.
+
+### S4.6 — Criteri di completamento
+
+- [ ] `health_check()` ritorna Unavailable con messaggio chiaro senza KVM
+- [ ] Conformance suite passa su Linux con KVM
+- [ ] Startup VM < 300ms verificato
+- [ ] `scheduling.backend: libkrun` funziona nella spec
+
+---
+
+## Crate condiviso: `agentsandbox-agent`
+
+Bubblewrap e nsjail usano entrambi lo stesso pattern: un agent minimale
+che gira nel sandbox e riceve comandi via socket UNIX.
+Invece di duplicare il codice, crea un crate dedicato.
+
+```toml
+# crates/agentsandbox-agent/Cargo.toml
+# Compilato sia come binary (per bwrap/nsjail)
+# sia come libreria (per altri usi)
+[package]
+name = "agentsandbox-agent"
+version = "0.1.0"
+
+[[bin]]
+name = "agentsandbox-agent"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full", "net"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+```
+
+```rust
+// crates/agentsandbox-agent/src/main.rs
+// Binary minimale che gira nel sandbox.
+// Ascolta su un socket UNIX, riceve comandi JSON, li esegue, risponde.
+// Target size: < 2MB stripped. Zero dipendenze esterne.
+
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixListener;
+use std::process::Stdio;
+
+#[derive(serde::Deserialize)]
+struct ExecRequest {
+    command: String,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(serde::Serialize)]
+struct ExecResponse {
+    stdout: String,
+    stderr: String,
+    exit_code: i64,
+    duration_ms: u64,
+}
+
+#[tokio::main]
+async fn main() {
+    let socket_path = std::env::var("AGENTSANDBOX_SOCKET")
+        .unwrap_or_else(|_| "/tmp/agentsandbox.sock".into());
+
+    // Rimuovi socket stale se esiste
+    let _ = std::fs::remove_file(&socket_path);
+
+    let listener = UnixListener::bind(&socket_path)
+        .expect("bind socket");
+
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                tokio::spawn(handle_connection(stream));
+            }
+            Err(e) => {
+                eprintln!("accept error: {}", e);
+            }
+        }
+    }
+}
+
+async fn handle_connection(stream: tokio::net::UnixStream) {
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        let req: ExecRequest = match serde_json::from_str(&line) {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = writer.write_all(
+                    format!("{{\"error\":\"{}\"}}\n", e).as_bytes()
+                ).await;
+                continue;
+            }
+        };
+
+        let start = std::time::Instant::now();
+        let timeout = req.timeout_ms.unwrap_or(30_000);
+
+        let output = tokio::time::timeout(
+            tokio::time::Duration::from_millis(timeout),
+            tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(&req.command)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+        ).await;
+
+        let response = match output {
+            Ok(Ok(out)) => ExecResponse {
+                stdout: String::from_utf8_lossy(&out.stdout).into(),
+                stderr: String::from_utf8_lossy(&out.stderr).into(),
+                exit_code: out.status.code().unwrap_or(-1) as i64,
+                duration_ms: start.elapsed().as_millis() as u64,
+            },
+            Ok(Err(e)) => ExecResponse {
+                stdout: String::new(),
+                stderr: e.to_string(),
+                exit_code: -1,
+                duration_ms: start.elapsed().as_millis() as u64,
+            },
+            Err(_) => ExecResponse {
+                stdout: String::new(),
+                stderr: format!("timeout dopo {}ms", timeout),
+                exit_code: -1,
+                duration_ms: timeout,
+            },
+        };
+
+        let _ = writer.write_all(
+            (serde_json::to_string(&response).unwrap() + "\n").as_bytes()
+        ).await;
+    }
+}
+```
+
+**Aggiorna il workspace:**
+```toml
+# Cargo.toml root — aggiungi:
+members = [
+    # ...esistenti...
+    "crates/agentsandbox-agent",
+    "crates/agentsandbox-backend-bubblewrap",
+    "crates/agentsandbox-backend-nsjail",
+    "crates/agentsandbox-backend-wasmtime",
+    "crates/agentsandbox-backend-libkrun",
+]
+```
+
+---
+
+
 ## FASE E — Backend Firecracker
 **Stima: 5-7 giorni | Solo Linux + KVM**
 

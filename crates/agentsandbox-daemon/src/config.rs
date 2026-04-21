@@ -32,11 +32,26 @@ pub struct AuthSection {
 pub struct BackendsSection {
     pub enabled: Vec<String>,
     #[serde(default)]
+    pub bubblewrap: BubblewrapBackendSection,
+    #[serde(default)]
     pub docker: DockerBackendSection,
     #[serde(default)]
     pub gvisor: GVisorBackendSection,
     #[serde(default)]
+    pub libkrun: LibkrunBackendSection,
+    #[serde(default)]
+    pub nsjail: NsjailBackendSection,
+    #[serde(default)]
     pub podman: PodmanBackendSection,
+    #[serde(default)]
+    pub wasmtime: WasmtimeBackendSection,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct BubblewrapBackendSection {
+    pub agent_path: Option<String>,
+    pub bwrap_path: Option<String>,
+    pub rootfs_base: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -55,6 +70,26 @@ pub struct PodmanBackendSection {
     pub socket: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct NsjailBackendSection {
+    pub agent_path: Option<String>,
+    pub chroot_base: Option<String>,
+    pub nsjail_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct WasmtimeBackendSection {
+    pub node_wasm_path: Option<String>,
+    pub python_wasm_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct LibkrunBackendSection {
+    pub runtime: Option<String>,
+    pub socket: Option<String>,
+    pub rootfs_dir: Option<String>,
+}
+
 impl DaemonConfig {
     pub fn listen_addr(&self) -> String {
         format!("{}:{}", self.daemon.host, self.daemon.port)
@@ -64,6 +99,19 @@ impl DaemonConfig {
 impl BackendsSection {
     pub fn config_for(&self, backend_id: &str) -> std::collections::HashMap<String, String> {
         match backend_id {
+            "bubblewrap" => {
+                let mut config = std::collections::HashMap::new();
+                if let Some(path) = &self.bubblewrap.bwrap_path {
+                    config.insert("bwrap_path".into(), path.clone());
+                }
+                if let Some(path) = &self.bubblewrap.rootfs_base {
+                    config.insert("rootfs_base".into(), path.clone());
+                }
+                if let Some(path) = &self.bubblewrap.agent_path {
+                    config.insert("agent_path".into(), path.clone());
+                }
+                config
+            }
             "docker" => {
                 let mut config = std::collections::HashMap::new();
                 if let Some(socket) = &self.docker.socket {
@@ -75,6 +123,42 @@ impl BackendsSection {
                 let mut config = std::collections::HashMap::new();
                 if let Some(socket) = &self.podman.socket {
                     config.insert("socket".into(), socket.clone());
+                }
+                config
+            }
+            "nsjail" => {
+                let mut config = std::collections::HashMap::new();
+                if let Some(path) = &self.nsjail.nsjail_path {
+                    config.insert("nsjail_path".into(), path.clone());
+                }
+                if let Some(path) = &self.nsjail.chroot_base {
+                    config.insert("chroot_base".into(), path.clone());
+                }
+                if let Some(path) = &self.nsjail.agent_path {
+                    config.insert("agent_path".into(), path.clone());
+                }
+                config
+            }
+            "wasmtime" => {
+                let mut config = std::collections::HashMap::new();
+                if let Some(path) = &self.wasmtime.python_wasm_path {
+                    config.insert("python_wasm_path".into(), path.clone());
+                }
+                if let Some(path) = &self.wasmtime.node_wasm_path {
+                    config.insert("node_wasm_path".into(), path.clone());
+                }
+                config
+            }
+            "libkrun" => {
+                let mut config = std::collections::HashMap::new();
+                if let Some(socket) = &self.libkrun.socket {
+                    config.insert("socket".into(), socket.clone());
+                }
+                if let Some(runtime) = &self.libkrun.runtime {
+                    config.insert("runtime".into(), runtime.clone());
+                }
+                if let Some(rootfs_dir) = &self.libkrun.rootfs_dir {
+                    config.insert("rootfs_dir".into(), rootfs_dir.clone());
                 }
                 config
             }
@@ -147,6 +231,15 @@ fn apply_env_overrides(cfg: &mut DaemonConfig) -> anyhow::Result<()> {
             .map(ToOwned::to_owned)
             .collect();
     }
+    if let Ok(path) = std::env::var("AS_BACKENDS_BUBBLEWRAP_BWRAP_PATH") {
+        cfg.backends.bubblewrap.bwrap_path = Some(path);
+    }
+    if let Ok(path) = std::env::var("AS_BACKENDS_BUBBLEWRAP_ROOTFS_BASE") {
+        cfg.backends.bubblewrap.rootfs_base = Some(path);
+    }
+    if let Ok(path) = std::env::var("AS_BACKENDS_BUBBLEWRAP_AGENT_PATH") {
+        cfg.backends.bubblewrap.agent_path = Some(path);
+    }
     if let Ok(socket) = std::env::var("AS_BACKENDS_DOCKER_SOCKET") {
         cfg.backends.docker.socket = Some(socket);
     }
@@ -158,6 +251,30 @@ fn apply_env_overrides(cfg: &mut DaemonConfig) -> anyhow::Result<()> {
     }
     if let Ok(socket) = std::env::var("AS_BACKENDS_PODMAN_SOCKET") {
         cfg.backends.podman.socket = Some(socket);
+    }
+    if let Ok(path) = std::env::var("AS_BACKENDS_NSJAIL_PATH") {
+        cfg.backends.nsjail.nsjail_path = Some(path);
+    }
+    if let Ok(path) = std::env::var("AS_BACKENDS_NSJAIL_CHROOT_BASE") {
+        cfg.backends.nsjail.chroot_base = Some(path);
+    }
+    if let Ok(path) = std::env::var("AS_BACKENDS_NSJAIL_AGENT_PATH") {
+        cfg.backends.nsjail.agent_path = Some(path);
+    }
+    if let Ok(path) = std::env::var("AS_BACKENDS_WASMTIME_PYTHON_WASM_PATH") {
+        cfg.backends.wasmtime.python_wasm_path = Some(path);
+    }
+    if let Ok(path) = std::env::var("AS_BACKENDS_WASMTIME_NODE_WASM_PATH") {
+        cfg.backends.wasmtime.node_wasm_path = Some(path);
+    }
+    if let Ok(socket) = std::env::var("AS_BACKENDS_LIBKRUN_SOCKET") {
+        cfg.backends.libkrun.socket = Some(socket);
+    }
+    if let Ok(runtime) = std::env::var("AS_BACKENDS_LIBKRUN_RUNTIME") {
+        cfg.backends.libkrun.runtime = Some(runtime);
+    }
+    if let Ok(path) = std::env::var("AS_BACKENDS_LIBKRUN_ROOTFS_DIR") {
+        cfg.backends.libkrun.rootfs_dir = Some(path);
     }
     Ok(())
 }
@@ -361,6 +478,7 @@ enabled = ["docker"]
     fn config_for_returns_backend_specific_socket() {
         let backends = BackendsSection {
             enabled: vec!["docker".into(), "gvisor".into(), "podman".into()],
+            bubblewrap: BubblewrapBackendSection::default(),
             docker: DockerBackendSection {
                 socket: Some("/docker.sock".into()),
             },
@@ -368,9 +486,12 @@ enabled = ["docker"]
                 socket: Some("/gvisor.sock".into()),
                 runtime: Some("runsc".into()),
             },
+            libkrun: LibkrunBackendSection::default(),
+            nsjail: NsjailBackendSection::default(),
             podman: PodmanBackendSection {
                 socket: Some("/podman.sock".into()),
             },
+            wasmtime: WasmtimeBackendSection::default(),
         };
 
         assert_eq!(

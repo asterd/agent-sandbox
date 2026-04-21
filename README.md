@@ -142,6 +142,7 @@ console.log(result.stdout.trim());
 ## Public docs
 
 - [Getting started](docs/getting-started.md)
+- [Deployment guide](docs/deployment.md)
 - [HTTP API v1](docs/api-http-v1.md)
 - [Spec v1](docs/spec-v1.md)
 - [Examples](examples/README.md)

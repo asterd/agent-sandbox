@@ -9,9 +9,13 @@
 
 use std::sync::Arc;
 
+use agentsandbox_backend_bubblewrap::BubblewrapBackendFactory;
 use agentsandbox_backend_docker::DockerBackendFactory;
 use agentsandbox_backend_gvisor::GVisorBackendFactory;
+use agentsandbox_backend_libkrun::LibkrunBackendFactory;
+use agentsandbox_backend_nsjail::NsjailBackendFactory;
 use agentsandbox_backend_podman::PodmanBackendFactory;
+use agentsandbox_backend_wasmtime::WasmtimeBackendFactory;
 use agentsandbox_daemon::{
     config::load_config, reaper, registry::BackendRegistry, router, state::AppState,
 };
@@ -44,6 +48,11 @@ async fn main() -> anyhow::Result<()> {
     for backend_id in &cfg.backends.enabled {
         let backend_config = cfg.backends.config_for(backend_id);
         match backend_id.as_str() {
+            "bubblewrap" => {
+                let factory = BubblewrapBackendFactory;
+                registry.register(&factory);
+                registry.initialize(&factory, &backend_config).await;
+            }
             "docker" => {
                 let factory = DockerBackendFactory;
                 registry.register(&factory);
@@ -59,8 +68,24 @@ async fn main() -> anyhow::Result<()> {
                 registry.register(&factory);
                 registry.initialize(&factory, &backend_config).await;
             }
+            "libkrun" => {
+                let factory = LibkrunBackendFactory;
+                registry.register(&factory);
+                registry.initialize(&factory, &backend_config).await;
+            }
+            "nsjail" => {
+                let factory = NsjailBackendFactory;
+                registry.register(&factory);
+                registry.initialize(&factory, &backend_config).await;
+            }
             other => {
-                tracing::warn!(backend_id = %other, "backend non riconosciuto");
+                if other == "wasmtime" {
+                    let factory = WasmtimeBackendFactory;
+                    registry.register(&factory);
+                    registry.initialize(&factory, &backend_config).await;
+                } else {
+                    tracing::warn!(backend_id = %other, "backend non riconosciuto");
+                }
             }
         }
     }
