@@ -10,13 +10,14 @@ use agentsandbox_sdk::error::BackendError;
 use axum::{
     extract::{Extension, Path, Query, State},
     http::{header, HeaderMap},
+    response::IntoResponse,
     Json,
 };
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::audit::{self, Event};
+use crate::audit::{self, AuditEvent, DestroyReason};
 use crate::error::ApiError;
 use crate::state::{AuthContext, SharedState};
 use crate::store::{self, AccessScope, SandboxRow};
@@ -39,6 +40,16 @@ pub async fn health(State(state): State<SharedState>) -> Json<Value> {
         "backend": primary_backend,
         "backends": backends,
     }))
+}
+
+pub async fn metrics(State(state): State<SharedState>) -> impl IntoResponse {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        state.metrics.to_prometheus(),
+    )
 }
 
 #[derive(Serialize)]
@@ -107,7 +118,7 @@ pub async fn list_backends(State(state): State<SharedState>) -> Json<Value> {
 
 // ---------- POST /v1/sandboxes ----------
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct CreateResponse {
     pub sandbox_id: String,
     pub lease_token: String,
@@ -202,8 +213,16 @@ pub async fn create_sandbox(
     // audit trail is more useful than a clean table.
     match backend.create(&ir).await {
         Ok(handle) => {
-            if let Err(error) =
-                persist_created_sandbox(&state, &backend, &backend_id, &ir.id, &handle).await
+            if let Err(error) = persist_created_sandbox(
+                &state,
+                &backend,
+                &backend_id,
+                &ir.id,
+                &handle,
+                auth.tenant_id(),
+                ir.ttl_seconds,
+            )
+            .await
             {
                 return Err(error);
             }
@@ -211,7 +230,12 @@ pub async fn create_sandbox(
         Err(e) => {
             let msg = e.to_string();
             store::set_status(&state.db, &ir.id, SandboxState::Failed(msg.clone())).await?;
-            audit::record(&state.db, &ir.id, Event::Error, Some(&msg)).await;
+            state.metrics.backend_error();
+            audit::record(
+                &state.db,
+                AuditEvent::backend_error(&ir.id, auth.tenant_id(), &backend_id, msg),
+            )
+            .await;
             return Err(e.into());
         }
     }
@@ -234,18 +258,31 @@ async fn persist_created_sandbox(
     backend_id: &str,
     sandbox_id: &str,
     handle: &str,
+    tenant_id: Option<&str>,
+    ttl_seconds: u64,
 ) -> Result<(), ApiError> {
     if let Err(error) = store::set_backend_handle(&state.db, sandbox_id, handle).await {
-        cleanup_after_persist_failure(state, backend, backend_id, sandbox_id, handle, &error).await;
+        cleanup_after_persist_failure(
+            state, backend, backend_id, sandbox_id, handle, tenant_id, &error,
+        )
+        .await;
         return Err(error);
     }
 
     if let Err(error) = store::set_status(&state.db, sandbox_id, SandboxState::Running).await {
-        cleanup_after_persist_failure(state, backend, backend_id, sandbox_id, handle, &error).await;
+        cleanup_after_persist_failure(
+            state, backend, backend_id, sandbox_id, handle, tenant_id, &error,
+        )
+        .await;
         return Err(error);
     }
 
-    audit::record(&state.db, sandbox_id, Event::Created, Some(backend_id)).await;
+    state.metrics.sandbox_created();
+    audit::record(
+        &state.db,
+        AuditEvent::sandbox_created(sandbox_id, tenant_id, backend_id, ttl_seconds),
+    )
+    .await;
     Ok(())
 }
 
@@ -255,6 +292,7 @@ async fn cleanup_after_persist_failure(
     backend_id: &str,
     sandbox_id: &str,
     handle: &str,
+    tenant_id: Option<&str>,
     error: &ApiError,
 ) {
     tracing::error!(
@@ -266,6 +304,7 @@ async fn cleanup_after_persist_failure(
     );
 
     if let Err(destroy_error) = backend.destroy(handle).await {
+        state.metrics.backend_error();
         tracing::error!(
             sandbox_id = %sandbox_id,
             backend_id = %backend_id,
@@ -273,6 +312,11 @@ async fn cleanup_after_persist_failure(
             error = %destroy_error,
             "cleanup backend fallito dopo persist error"
         );
+        audit::record(
+            &state.db,
+            AuditEvent::backend_error(sandbox_id, tenant_id, backend_id, destroy_error.to_string()),
+        )
+        .await;
     }
 
     let message = error.to_string();
@@ -289,7 +333,12 @@ async fn cleanup_after_persist_failure(
             "impossibile marcare la sandbox come failed dopo cleanup"
         );
     }
-    audit::record(&state.db, sandbox_id, Event::Error, Some(&message)).await;
+    state.metrics.backend_error();
+    audit::record(
+        &state.db,
+        AuditEvent::backend_error(sandbox_id, tenant_id, backend_id, message),
+    )
+    .await;
 }
 
 // ---------- GET /v1/sandboxes/:id ----------
@@ -504,17 +553,38 @@ pub async fn exec_sandbox(
             e.to_string(),
         )
     })?;
-    let result = backend
-        .exec(row.runtime_handle(), &req.command, None)
-        .await?;
     audit::record(
         &state.db,
-        &id,
-        Event::Exec,
-        Some(&format!(
-            "exit={} duration_ms={}",
-            result.exit_code, result.duration_ms
-        )),
+        AuditEvent::exec_started(&id, row.tenant_id.as_deref(), &row.backend, &req.command),
+    )
+    .await;
+    let result = match backend.exec(row.runtime_handle(), &req.command, None).await {
+        Ok(result) => result,
+        Err(error) => {
+            state.metrics.backend_error();
+            audit::record(
+                &state.db,
+                AuditEvent::backend_error(
+                    &id,
+                    row.tenant_id.as_deref(),
+                    &row.backend,
+                    error.to_string(),
+                ),
+            )
+            .await;
+            return Err(error.into());
+        }
+    };
+    state.metrics.exec_finished();
+    audit::record(
+        &state.db,
+        AuditEvent::exec_finished(
+            &id,
+            row.tenant_id.as_deref(),
+            &row.backend,
+            result.exit_code,
+            result.duration_ms,
+        ),
     )
     .await;
 
@@ -551,10 +621,36 @@ pub async fn destroy_sandbox(
                 e.to_string(),
             )
         })?;
-        backend.destroy(row.runtime_handle()).await?;
+        if let Err(error) = backend.destroy(row.runtime_handle()).await {
+            state.metrics.backend_error();
+            audit::record(
+                &state.db,
+                AuditEvent::backend_error(
+                    &id,
+                    row.tenant_id.as_deref(),
+                    &row.backend,
+                    error.to_string(),
+                ),
+            )
+            .await;
+            return Err(error.into());
+        }
+        let was_active = matches!(row.status.as_str(), "creating" | "running");
+        store::delete_sandbox(&state.db, &id).await?;
+        state.metrics.sandbox_destroyed(was_active);
+        audit::record(
+            &state.db,
+            AuditEvent::sandbox_destroyed(
+                &id,
+                row.tenant_id.as_deref(),
+                &row.backend,
+                DestroyReason::ClientRequest,
+            ),
+        )
+        .await;
+        return Ok(axum::http::StatusCode::NO_CONTENT);
     }
     store::delete_sandbox(&state.db, &id).await?;
-    audit::record(&state.db, &id, Event::Destroyed, None).await;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -586,6 +682,7 @@ mod tests {
         config::{
             AuthMode, AuthSection, BackendsSection, DaemonConfig, DaemonSection, DatabaseSection,
         },
+        metrics::Metrics,
         registry::BackendRegistry,
         router,
         state::AppState,
@@ -614,10 +711,16 @@ mod tests {
         async fn exec(
             &self,
             _handle: &str,
-            _command: &str,
+            command: &str,
             _timeout_ms: Option<u64>,
         ) -> Result<ExecResult, BackendError> {
-            Err(BackendError::Internal("unused".into()))
+            Ok(ExecResult {
+                stdout: command.to_string(),
+                stderr: String::new(),
+                exit_code: 0,
+                duration_ms: 7,
+                resource_usage: None,
+            })
         }
 
         async fn status(&self, handle: &str) -> Result<SandboxStatus, BackendError> {
@@ -740,6 +843,7 @@ mod tests {
                 db,
                 config: test_config(AuthMode::SingleUser),
                 registry: Arc::new(registry),
+                metrics: Metrics::new(),
             }),
             destroyed,
             last_extensions,
@@ -770,6 +874,7 @@ mod tests {
                 db,
                 config: test_config(AuthMode::SingleUser),
                 registry: Arc::new(registry),
+                metrics: Metrics::new(),
             }),
             destroyed,
             last_extensions,
@@ -872,6 +977,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metrics_endpoint_returns_prometheus_payload() {
+        let db = test_db().await;
+        let (state, _, _) = test_state(db, InspectBehavior::Status(SandboxState::Running)).await;
+        state.metrics.sandbox_created();
+        state.metrics.exec_finished();
+        state.metrics.backend_error();
+        let app = router::build(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; version=0.0.4; charset=utf-8")
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload = String::from_utf8(body.to_vec()).unwrap();
+        assert!(payload.contains("agentsandbox_sandboxes_created_total 1"));
+        assert!(payload.contains("agentsandbox_exec_total 1"));
+        assert!(payload.contains("agentsandbox_backend_errors_total 1"));
+    }
+
+    #[tokio::test]
     async fn create_sandbox_accepts_v1_yaml() {
         let db = test_db().await;
         let (state, _, _) = test_state(db, InspectBehavior::Status(SandboxState::Running)).await;
@@ -892,6 +1034,94 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn sandbox_lifecycle_writes_structured_audit_log() {
+        let db = test_db().await;
+        let (state, _, _) =
+            test_state(db.clone(), InspectBehavior::Status(SandboxState::Running)).await;
+        let app = router::build(state);
+
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"apiVersion":"sandbox.ai/v1","kind":"Sandbox","metadata":{},"spec":{"runtime":{"preset":"python"}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status(), axum::http::StatusCode::CREATED);
+
+        let create_body = axum::body::to_bytes(create.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let created: CreateResponse = serde_json::from_slice(&create_body).unwrap();
+
+        let exec = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/sandboxes/{}/exec", created.sandbox_id))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(LEASE_HEADER, &created.lease_token)
+                    .body(Body::from(r#"{"command":"echo hello"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(exec.status(), axum::http::StatusCode::OK);
+
+        let destroy = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/sandboxes/{}", created.sandbox_id))
+                    .header(LEASE_HEADER, &created.lease_token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(destroy.status(), axum::http::StatusCode::NO_CONTENT);
+
+        let rows = sqlx::query(
+            "SELECT event, detail FROM audit_log WHERE sandbox_id = ?1 ORDER BY id ASC",
+        )
+        .bind(&created.sandbox_id)
+        .fetch_all(&db)
+        .await
+        .unwrap();
+
+        let events: Vec<String> = rows.iter().map(|row| row.get("event")).collect();
+        assert_eq!(
+            events,
+            vec![
+                "sandbox_created",
+                "exec_started",
+                "exec_finished",
+                "sandbox_destroyed"
+            ]
+        );
+
+        let exec_started_detail: Value = serde_json::from_str(rows[1].get("detail")).unwrap();
+        assert_eq!(
+            exec_started_detail["event"]["command_hash"],
+            crate::audit::command_hash("echo hello")
+        );
+        assert_eq!(exec_started_detail["backend_id"], "mock");
+        assert_eq!(exec_started_detail["event"]["type"], "exec_started");
+        assert!(!rows[1].get::<String, _>("detail").contains("echo hello"));
+
+        let destroyed_detail: Value = serde_json::from_str(rows[3].get("detail")).unwrap();
+        assert_eq!(destroyed_detail["event"]["reason"], "client_request");
     }
 
     #[tokio::test]

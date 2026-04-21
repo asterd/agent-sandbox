@@ -1,5 +1,6 @@
 //! Shared application state wired into every handler.
 
+use crate::metrics::Metrics;
 use crate::registry::BackendRegistry;
 use crate::{config::DaemonConfig, store::TenantRecord};
 use sqlx::SqlitePool;
@@ -9,6 +10,7 @@ pub struct AppState {
     pub db: SqlitePool,
     pub config: DaemonConfig,
     pub registry: Arc<BackendRegistry>,
+    pub metrics: Arc<Metrics>,
 }
 
 /// Type alias we pass to axum's `State` extractor.

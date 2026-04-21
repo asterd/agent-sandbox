@@ -4,7 +4,7 @@
 //! mechanism for `ttl_seconds`; the backend backstop (a long `sleep` PID 1
 //! inside the container) is a safety net for when the daemon is down.
 
-use crate::audit::{self, Event};
+use crate::audit::{self, AuditEvent, DestroyReason};
 use crate::state::SharedState;
 use crate::store;
 use std::time::Duration;
@@ -36,17 +36,51 @@ pub async fn sweep(state: &SharedState) -> Result<usize, crate::error::ApiError>
             match state.registry.get(&row.backend) {
                 Ok(backend) => {
                     if let Err(error) = backend.destroy(row.runtime_handle()).await {
+                        state.metrics.backend_error();
                         tracing::warn!(
                             sandbox_id = %id,
                             error = %error,
                             "destroy during reap failed"
                         );
+                        audit::record(
+                            &state.db,
+                            AuditEvent::backend_error(
+                                &id,
+                                row.tenant_id.as_deref(),
+                                &row.backend,
+                                error.to_string(),
+                            ),
+                        )
+                        .await;
                     }
                 }
                 Err(error) => {
+                    state.metrics.backend_error();
                     tracing::warn!(sandbox_id = %id, error = %error, "backend missing during reap");
+                    audit::record(
+                        &state.db,
+                        AuditEvent::backend_error(
+                            &id,
+                            row.tenant_id.as_deref(),
+                            &row.backend,
+                            error.to_string(),
+                        ),
+                    )
+                    .await;
                 }
             }
+            let was_active = matches!(row.status.as_str(), "creating" | "running");
+            state.metrics.sandbox_expired(was_active);
+            audit::record(
+                &state.db,
+                AuditEvent::sandbox_destroyed(
+                    &id,
+                    row.tenant_id.as_deref(),
+                    &row.backend,
+                    DestroyReason::TtlExpired,
+                ),
+            )
+            .await;
         }
         store::set_status(
             &state.db,
@@ -54,7 +88,6 @@ pub async fn sweep(state: &SharedState) -> Result<usize, crate::error::ApiError>
             agentsandbox_sdk::backend::SandboxState::Stopped,
         )
         .await?;
-        audit::record(&state.db, &id, Event::Expired, None).await;
     }
     Ok(count)
 }
@@ -84,6 +117,7 @@ mod tests {
         config::{
             AuthMode, AuthSection, BackendsSection, DaemonConfig, DaemonSection, DatabaseSection,
         },
+        metrics::Metrics,
         registry::BackendRegistry,
         state::AppState,
         store,
@@ -258,6 +292,7 @@ mod tests {
                 },
             },
             registry: Arc::new(registry),
+            metrics: Metrics::new(),
         });
 
         let count = sweep(&state).await.unwrap();

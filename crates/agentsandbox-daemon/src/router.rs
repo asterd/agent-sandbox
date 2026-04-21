@@ -11,6 +11,7 @@ use crate::{handlers, middleware::auth::auth_middleware, state::SharedState};
 
 pub fn build(state: SharedState) -> Router {
     Router::new()
+        .route("/metrics", get(handlers::metrics))
         .route("/v1/health", get(handlers::health))
         .route("/v1/backends", get(handlers::list_backends))
         .route("/v1/sandboxes", post(handlers::create_sandbox))

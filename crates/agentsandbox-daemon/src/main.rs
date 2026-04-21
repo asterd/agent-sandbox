@@ -17,7 +17,8 @@ use agentsandbox_backend_nsjail::NsjailBackendFactory;
 use agentsandbox_backend_podman::PodmanBackendFactory;
 use agentsandbox_backend_wasmtime::WasmtimeBackendFactory;
 use agentsandbox_daemon::{
-    config::load_config, reaper, registry::BackendRegistry, router, state::AppState,
+    config::load_config, metrics::Metrics, reaper, registry::BackendRegistry, router,
+    state::AppState,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
@@ -99,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         config: cfg,
         registry: Arc::new(registry),
+        metrics: Metrics::new(),
     });
 
     let reaper_state = state.clone();
