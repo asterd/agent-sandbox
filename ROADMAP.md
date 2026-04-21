@@ -1564,12 +1564,12 @@ Esegui codice di agenti LLM in sandbox isolate. Zero configurazione, zero vendor
 
 ## Quickstart (30 secondi)
 
-# 1. Avvia il daemon
-cargo install agentsandbox-daemon
-agentsandbox-daemon
+# 1. Avvia il daemon dal repo
+cargo run -p agentsandbox-daemon
 
-# 2. Usa l'SDK Python
-pip install agentsandbox
+# 2. Installa l'SDK Python locale
+cd sdks/python
+pip install -e ".[dev]"
 
 # Python
 from agentsandbox import Sandbox
@@ -1588,6 +1588,7 @@ asyncio.run(main())
 - [ ] Un developer mai sentito parlare del progetto riesce a fare il quickstart in < 5 minuti
 - [ ] Ogni limite noto è documentato (non nascosto)
 - [ ] I codici errore dell'API sono documentati con esempi
+- [ ] `docs/getting-started.md`, `docs/api-http-v1.md` e `docs/spec-v1alpha1.md` sono coerenti con il comportamento reale del repo
 
 ---
 
@@ -1614,10 +1615,10 @@ asyncio.run(main())
 
 ---
 
-## FASE 8 — Examples (branch `examples/`)
+## FASE 8 — Examples (`examples/` directory)
 **Stima:** 1 giorno | **Prerequisiti:** Fase 4 e 5 completate e daemon funzionante
 
-Questi esempi vivono nel branch `examples/` del repo e servono a tre scopi:
+Questi esempi vivono nella directory `examples/` del repo e servono a tre scopi:
 1. Verificare che il framework non abbia friction nascosta in uso reale
 2. Dare al primo utente qualcosa da copiare e modificare in 5 minuti
 3. Testare il "test di verità" del progetto in modo concreto e dimostrabile
@@ -1626,19 +1627,28 @@ Questi esempi vivono nel branch `examples/` del repo e servono a tre scopi:
 
 ### 8.1 — Esempio Python: Code Review Agent
 
-**Cosa fa:** Prende un file Python in input, lo manda a Claude via API, Claude suggerisce fix, il fix viene eseguito nella sandbox per verificare che compili ed i test passino. Reale, utile, dimostrabile.
+**Cosa fa:** Prende un file Python in input, lo manda a Claude via API, Claude suggerisce fix, il fix viene eseguito nella sandbox per verificare che compili e che l'output atteso venga prodotto. Reale, utile, dimostrabile.
 
 **Struttura:**
 ```
 examples/
 └── python-code-review-agent/
     ├── README.md
-    ├── requirements.txt          # anthropic, agentsandbox
+    ├── requirements.txt          # anthropic + SDK Python locale
     ├── agent.py                  # entry point
     ├── sample_code/
     │   └── buggy_script.py       # script con bug intenzionali
     └── .env.example              # ANTHROPIC_API_KEY=...
 ```
+
+**Nota di implementazione:** evita quoting fragile del codice generato dal modello.
+Scrivi il file nella sandbox con base64 o un approccio equivalente, non con semplice interpolazione shell.
+
+**Vincoli pratici:**
+
+- usa un model id esplicito e attuale, configurabile via `ANTHROPIC_MODEL`
+- non assumere che l'SDK `agentsandbox` sia pubblicato: l'esempio deve funzionare anche installando `../../sdks/python`
+- il blocco "output atteso" del README deve distinguere chiaramente tra porzioni stabili e campi dinamici (`<duration-ms>`, testo LLM, ecc.)
 
 **Codice completo `agent.py`:**
 
@@ -1653,9 +1663,9 @@ Flusso:
 4. Riporta: bug trovati, codice fixato, output dell'esecuzione
 
 Prerequisiti:
-    pip install anthropic agentsandbox
+    pip install -r requirements.txt
     export ANTHROPIC_API_KEY=...
-    agentsandbox-daemon  # in un altro terminale
+    cargo run -p agentsandbox-daemon  # dal root repo, in un altro terminale
 """
 
 import asyncio
@@ -1683,7 +1693,7 @@ async def review_and_run(filepath: str) -> None:
     # 1. Chiedi a Claude di fare review
     print("🤖 Claude sta analizzando il codice...")
     message = client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-sonnet-4-20250514",
         max_tokens=2048,
         system=SYSTEM_PROMPT,
         messages=[{
@@ -1716,11 +1726,11 @@ async def review_and_run(filepath: str) -> None:
         # Nessun egress: il codice non deve fare network calls
     ) as sb:
         # Scrivi il file fixato nella sandbox
-        escaped = review["fixed_code"].replace("'", "'\\''")
-        write_result = await sb.exec(f"cat > /workspace/script.py << 'PYEOF'\n{review['fixed_code']}\nPYEOF")
+        # Usa base64 o equivalente: evita che quote/newline rompano il comando shell.
+        write_result = await sb.exec("...scrittura robusta del file...")
 
         # Esegui
-        result = await sb.exec("python /workspace/script.py")
+        result = await sb.exec("python -m py_compile /workspace/script.py && python /workspace/script.py")
 
         print("\n📦 Output sandbox:")
         print("─" * 30)
@@ -1788,11 +1798,11 @@ Un agente che usa Claude per fare code review e verifica i fix in sandbox isolat
 ## Setup (2 minuti)
 
 ```bash
-# 1. Avvia il daemon AgentSandbox
-agentsandbox-daemon &
+# 1. Avvia il daemon AgentSandbox dal root del repo
+cargo run -p agentsandbox-daemon
 
 # 2. Installa le dipendenze
-pip install anthropic agentsandbox
+pip install -r requirements.txt
 
 # 3. Configura la API key
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -1804,26 +1814,28 @@ python agent.py sample_code/buggy_script.py
 ## Output atteso
 
 ```
-📄 Revisione di: sample_code/buggy_script.py
-──────────────────────────────────────────────
-🤖 Claude sta analizzando il codice...
+Reviewing: sample_code/buggy_script.py
+Using model: claude-sonnet-4-20250514
+--------------------------------------------------
+Requesting review from Claude...
 
-🐛 Bug trovati (3):
-   • Divisione per zero quando la lista è vuota
-   • find_duplicates confronta ogni elemento con se stesso
-   • parse_config non fa strip delle chiavi
+Bugs found (3):
+ - <bug 1>
+ - <bug 2>
+ - <bug 3>
 
-💡 Spiegazione: ...
+Explanation:
+<spiegazione breve>
 
-🔒 Esecuzione del codice fixato in sandbox isolata...
+Running fixed code inside AgentSandbox...
 
-📦 Output sandbox:
-──────────────────
+Sandbox output:
+------------------------------
 3.0
 [2, 3]
 {'host': 'localhost', 'port': '8080'}
-──────────────────
-✅ Codice eseguito con successo (exit 0, 312ms)
+------------------------------
+Execution succeeded (exit 0, <duration-ms>ms)
 ```
 
 ## Cosa dimostra
@@ -1837,7 +1849,7 @@ python agent.py sample_code/buggy_script.py
 
 ### 8.2 — Esempio TypeScript: Dependency Auditor Agent
 
-**Cosa fa:** Prende un `package.json`, installa le dipendenze in sandbox isolata con accesso solo a registry.npmjs.org, esegue `npm audit`, ritorna un report strutturato. Utile in CI, dimostra egress filtering reale.
+**Cosa fa:** Prende un `package.json`, installa le dipendenze in sandbox isolata con accesso solo ai registry necessari, esegue `npm audit`, ritorna un report strutturato. Utile in CI, dimostra egress filtering reale.
 
 **Struttura:**
 ```
@@ -1867,7 +1879,7 @@ examples/
  *
  * Prerequisiti:
  *   npm install
- *   ANTHROPIC_API_KEY=... npx ts-node src/auditor.ts sample/package.json
+ *   ANTHROPIC_API_KEY=... npm run start -- sample/package.json
  */
 
 import { Sandbox } from 'agentsandbox';
@@ -1936,7 +1948,7 @@ async function auditDependencies(packageJsonPath: string): Promise<AuditReport> 
     // 5. Chiedi a Claude una summary
     console.log('🤖 Claude sta analizzando il report...');
     const message = await anthropic.messages.create({
-      model: 'claude-opus-4-5',
+      model: 'claude-sonnet-4-20250514',
       max_tokens: 512,
       messages: [{
         role: 'user',
@@ -2012,7 +2024,7 @@ main();
 
 ---
 
-### 8.3 — Struttura finale del branch examples
+### 8.3 — Struttura finale della directory `examples/`
 
 ```
 examples/
@@ -2050,6 +2062,7 @@ Esempi reali e funzionanti che mostrano AgentSandbox in uso.
 1. Docker running
 2. AgentSandbox daemon: `agentsandbox-daemon`
 3. `ANTHROPIC_API_KEY` settata
+4. Gli SDK sono installati dal workspace locale, non dal registry pubblico
 
 ## Vuoi contribuire un esempio?
 
@@ -2065,10 +2078,10 @@ Un buon esempio AgentSandbox:
 ### 8.4 — Criteri di completamento Fase 8
 
 - [ ] `python agent.py sample_code/buggy_script.py` produce output con bug trovati + exec sandbox
-- [ ] `npx ts-node src/auditor.ts sample/package.json` produce report con vulnerabilità
+- [ ] `npm run start -- sample/package.json` produce report con vulnerabilità
 - [ ] Entrambi gli esempi funzionano con daemon fresh start (no stato precedente)
 - [ ] L'esempio TypeScript esce con code 1 se trova vulnerabilità critiche (usabile in CI)
-- [ ] Il README di ogni esempio include l'output atteso letterale (non inventato)
+- [ ] Il README di ogni esempio include output di riferimento con sezioni dinamiche marcate esplicitamente
 - [ ] Nessun esempio richiede configurazione oltre `ANTHROPIC_API_KEY` e Docker
 
 ---
