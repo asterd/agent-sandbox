@@ -18,6 +18,7 @@ connection refused) bubble up as :class:`SandboxError`.
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from typing import Any
 
 import httpx
@@ -75,10 +76,17 @@ class Sandbox:
         secret_files: dict[str, str] | None = None,
         working_dir: str | None = None,
         prefer_warm: bool = False,
+        backend: str | None = None,
+        extensions: dict[str, Any] | None = None,
         daemon_url: str = DEFAULT_DAEMON_URL,
         timeout: float = DEFAULT_TIMEOUT,
         client: httpx.AsyncClient | None = None,
     ) -> None:
+        if extensions is not None and not backend:
+            raise ValueError(
+                "extensions richiede backend esplicito. "
+                "Es: Sandbox(runtime='python', backend='docker', extensions={...})"
+            )
         self._config = SandboxConfig(
             runtime=runtime,
             image=image,
@@ -92,6 +100,8 @@ class Sandbox:
             secret_files=dict(secret_files or {}),
             working_dir=working_dir,
             prefer_warm=prefer_warm,
+            backend=backend,
+            extensions=deepcopy(extensions) if extensions is not None else None,
         )
         self._sandbox_id: str | None = None
         self._lease_token: str | None = None

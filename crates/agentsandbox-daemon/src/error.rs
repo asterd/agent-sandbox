@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 
 #[derive(Debug, Clone, Copy)]
 pub enum ApiErrorCode {
+    BackendNotFound,
     SandboxNotFound,
     SandboxExpired,
     SpecInvalid,
@@ -35,6 +36,7 @@ pub enum ApiErrorCode {
 impl ApiErrorCode {
     pub fn as_str(&self) -> &'static str {
         match self {
+            ApiErrorCode::BackendNotFound => "BACKEND_NOT_FOUND",
             ApiErrorCode::SandboxNotFound => "SANDBOX_NOT_FOUND",
             ApiErrorCode::SandboxExpired => "SANDBOX_EXPIRED",
             ApiErrorCode::SpecInvalid => "SPEC_INVALID",
@@ -49,6 +51,7 @@ impl ApiErrorCode {
 
     pub fn status(&self) -> StatusCode {
         match self {
+            ApiErrorCode::BackendNotFound => StatusCode::NOT_FOUND,
             ApiErrorCode::SandboxNotFound => StatusCode::NOT_FOUND,
             ApiErrorCode::SandboxExpired => StatusCode::GONE,
             ApiErrorCode::SpecInvalid => StatusCode::UNPROCESSABLE_ENTITY,
@@ -90,6 +93,13 @@ impl ApiError {
         Self::new(
             ApiErrorCode::SandboxNotFound,
             format!("sandbox {id} non trovata"),
+        )
+    }
+
+    pub fn backend_not_found(id: &str) -> Self {
+        Self::new(
+            ApiErrorCode::BackendNotFound,
+            format!("backend {id} non trovato"),
         )
     }
 

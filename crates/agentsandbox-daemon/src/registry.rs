@@ -87,6 +87,12 @@ impl BackendRegistry {
             .ok_or_else(|| RegistryError::RequestedUnavailable(backend_id.to_string()))
     }
 
+    pub fn available_descriptor(&self, backend_id: &str) -> Option<&BackendDescriptor> {
+        self.descriptors
+            .get(backend_id)
+            .filter(|descriptor| self.instances.contains_key(descriptor.id))
+    }
+
     pub fn list_available(&self) -> Vec<&BackendDescriptor> {
         self.descriptors
             .values()

@@ -121,6 +121,9 @@
             }
           }
         },
+        "extensions": {
+          "type": "object"
+        },
         "storage": {
           "type": "object",
           "additionalProperties": false,

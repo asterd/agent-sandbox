@@ -67,6 +67,8 @@ class SandboxConfig:
     secret_files: dict[str, str] = field(default_factory=dict)
     working_dir: str | None = None
     prefer_warm: bool = False
+    backend: str | None = None
+    extensions: dict[str, Any] | None = None
 
     API_VERSION: ClassVar[str] = "sandbox.ai/v1"
     KIND: ClassVar[str] = "Sandbox"
@@ -118,8 +120,15 @@ class SandboxConfig:
                 {"name": name, "valueFrom": {"file": path}}
                 for name, path in self.secret_files.items()
             )
-        if self.prefer_warm:
-            spec_body["scheduling"] = {"preferWarm": True}
+        if self.backend or self.prefer_warm:
+            scheduling: dict[str, Any] = {}
+            if self.backend:
+                scheduling["backend"] = self.backend
+            if self.prefer_warm:
+                scheduling["preferWarm"] = True
+            spec_body["scheduling"] = scheduling
+        if self.extensions is not None:
+            spec_body["extensions"] = self.extensions
 
         return {
             "apiVersion": self.API_VERSION,

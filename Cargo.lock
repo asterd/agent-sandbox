@@ -167,6 +167,7 @@ dependencies = [
  "chrono",
  "config",
  "futures",
+ "jsonschema",
  "serde",
  "serde_json",
  "serde_yaml",

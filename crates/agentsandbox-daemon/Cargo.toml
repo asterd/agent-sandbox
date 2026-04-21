@@ -31,6 +31,7 @@ uuid = { workspace = true }
 futures = { workspace = true }
 config = { workspace = true }
 sha2 = { workspace = true }
+jsonschema = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

@@ -87,3 +87,19 @@ def test_to_spec_supports_working_dir_disk_and_prefer_warm():
     assert spec["spec"]["runtime"]["workingDir"] == "/sandbox"
     assert spec["spec"]["resources"]["diskMb"] == 2048
     assert spec["spec"]["scheduling"] == {"preferWarm": True}
+
+
+def test_to_spec_supports_backend_and_extensions():
+    spec = SandboxConfig(
+        runtime="python",
+        backend="docker",
+        prefer_warm=True,
+        extensions={"docker": {"hostConfig": {"capAdd": ["NET_ADMIN"]}}},
+    ).to_spec()
+    assert spec["spec"]["scheduling"] == {
+        "backend": "docker",
+        "preferWarm": True,
+    }
+    assert spec["spec"]["extensions"] == {
+        "docker": {"hostConfig": {"capAdd": ["NET_ADMIN"]}}
+    }

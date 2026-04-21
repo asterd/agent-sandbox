@@ -72,6 +72,10 @@ pub enum CompileError {
     InvalidSecretSource { name: String },
     #[error("egress allow contiene hostname non valido: {0}")]
     InvalidHostname(String),
+    #[error("extensions richiede scheduling.backend esplicito")]
+    ExtensionsRequireExplicitBackend,
+    #[error("extensions.{0} non consentita: {1}")]
+    ExtensionForbidden(String, String),
 }
 
 pub fn detect_version(raw: &Value) -> Result<SpecVersion, CompileError> {
@@ -110,44 +114,84 @@ pub fn compile(spec: SandboxSpec) -> Result<SandboxIR, CompileError> {
         return Err(CompileError::UnsupportedKind(spec.kind));
     }
 
-    let body = spec.spec;
+    let crate::spec::SandboxSpecBody {
+        runtime,
+        resources,
+        network,
+        secrets,
+        ttl_seconds,
+        scheduling,
+        extensions,
+        storage,
+        observability,
+    } = spec.spec;
+
     let mut ir = SandboxIR {
-        image: resolve_image(
-            &body.runtime.image,
-            body.runtime.preset,
-            body.runtime.version.as_deref(),
-        )?,
-        runtime_version: body.runtime.version,
+        image: resolve_image(&runtime.image, runtime.preset, runtime.version.as_deref())?,
+        runtime_version: runtime.version,
         labels: spec.metadata.labels.unwrap_or_default(),
         ..SandboxIR::default()
     };
 
-    if let Some(wd) = body.runtime.working_dir {
+    if let Some(wd) = runtime.working_dir {
         ir.working_dir = wd;
     }
 
-    apply_resources(&mut ir, body.resources);
-    apply_network(&mut ir, body.network)?;
-    apply_secrets(&mut ir, body.secrets)?;
-    apply_runtime_env(&mut ir, body.runtime.env);
+    if let Some(ext) = extensions {
+        let backend = scheduling
+            .as_ref()
+            .and_then(|cfg| cfg.backend.as_deref())
+            .ok_or(CompileError::ExtensionsRequireExplicitBackend)?;
+        validate_extensions_safety(&ext, backend)?;
+        ir.extensions = Some(ext);
+    }
 
-    if let Some(ttl) = body.ttl_seconds {
+    apply_resources(&mut ir, resources);
+    apply_network(&mut ir, network)?;
+    apply_secrets(&mut ir, secrets)?;
+    apply_runtime_env(&mut ir, runtime.env);
+
+    if let Some(ttl) = ttl_seconds {
         ir.ttl_seconds = ttl;
     }
-    if let Some(scheduling) = body.scheduling {
+    if let Some(scheduling) = scheduling {
         ir.backend_hint = scheduling.backend;
         ir.prefer_warm = scheduling.prefer_warm;
         ir.priority = scheduling.priority.map(map_priority);
     }
-    if let Some(storage) = body.storage {
+    if let Some(storage) = storage {
         ir.storage_volumes = storage.volumes;
     }
-    if let Some(observability) = body.observability {
+    if let Some(observability) = observability {
         ir.audit_level = observability.audit_level.map(map_audit_level);
         ir.metrics_enabled = observability.metrics_enabled.unwrap_or(false);
     }
 
     Ok(ir)
+}
+
+fn validate_extensions_safety(ext: &Value, backend: &str) -> Result<(), CompileError> {
+    let forbidden = match backend {
+        "docker" | "podman" => vec![
+            ("/docker/hostConfig/networkMode", "usa spec.network.egress"),
+            ("/docker/name", "gestito internamente"),
+            ("/podman/hostConfig/networkMode", "usa spec.network.egress"),
+            ("/podman/name", "gestito internamente"),
+        ],
+        "firecracker" => vec![("/firecracker/vsock", "riservato al canale exec interno")],
+        _ => vec![],
+    };
+
+    for (path, reason) in forbidden {
+        if ext.pointer(path).is_some() {
+            return Err(CompileError::ExtensionForbidden(
+                path.trim_start_matches('/').replace('/', "."),
+                reason.into(),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn apply_resources(ir: &mut SandboxIR, resources: Option<ResourceSpec>) {
@@ -380,6 +424,49 @@ spec:
 "#;
         let ir = compile_any(raw).unwrap();
         assert_eq!(ir.backend_hint.as_deref(), Some("gvisor"));
+    }
+
+    #[test]
+    fn compile_rejects_extensions_without_explicit_backend() {
+        let raw = r#"
+apiVersion: sandbox.ai/v1
+kind: Sandbox
+metadata: {}
+spec:
+  runtime:
+    preset: python
+  extensions:
+    docker:
+      hostConfig:
+        capAdd: ["NET_ADMIN"]
+"#;
+        assert!(matches!(
+            compile_any(raw),
+            Err(CompileError::ExtensionsRequireExplicitBackend)
+        ));
+    }
+
+    #[test]
+    fn compile_rejects_forbidden_docker_extension() {
+        let raw = r#"
+apiVersion: sandbox.ai/v1
+kind: Sandbox
+metadata: {}
+spec:
+  runtime:
+    preset: python
+  scheduling:
+    backend: docker
+  extensions:
+    docker:
+      hostConfig:
+        networkMode: host
+"#;
+        assert!(matches!(
+            compile_any(raw),
+            Err(CompileError::ExtensionForbidden(path, _))
+            if path == "docker.hostConfig.networkMode"
+        ));
     }
 
     #[test]

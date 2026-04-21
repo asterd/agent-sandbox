@@ -23,7 +23,6 @@ use crate::state::{AuthContext, SharedState};
 use crate::store::{self, AccessScope, SandboxRow};
 
 const LEASE_HEADER: &str = "X-Lease-Token";
-const EXTENSIONS_HEADER: &str = "X-AgentSandbox-Extensions";
 
 // ---------- /v1/health ----------
 
@@ -116,6 +115,22 @@ pub async fn list_backends(State(state): State<SharedState>) -> Json<Value> {
     Json(json!({ "items": items }))
 }
 
+pub async fn get_backend_extensions_schema(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let descriptor = state
+        .registry
+        .available_descriptor(&id)
+        .ok_or_else(|| ApiError::backend_not_found(&id))?;
+    let raw_schema = descriptor
+        .extensions_schema
+        .ok_or_else(|| ApiError::backend_not_found(&id))?;
+    let schema = serde_json::from_str(raw_schema)
+        .map_err(|e| ApiError::internal(format!("schema extensions non valida per {id}: {e}")))?;
+    Ok(Json(schema))
+}
+
 // ---------- POST /v1/sandboxes ----------
 
 #[derive(Deserialize, Serialize)]
@@ -142,29 +157,53 @@ fn parse_spec_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, ApiError> 
     }
 }
 
-fn parse_hidden_extensions(headers: &HeaderMap) -> Result<Option<Value>, ApiError> {
-    let Some(raw) = headers.get(EXTENSIONS_HEADER) else {
-        return Ok(None);
-    };
+fn extension_path(raw_path: &str) -> String {
+    if raw_path.is_empty() {
+        "/spec/extensions".into()
+    } else if raw_path.starts_with('/') {
+        format!("/spec/extensions{raw_path}")
+    } else {
+        format!("/spec/extensions/{raw_path}")
+    }
+}
 
-    let raw = raw.to_str().map_err(|_| {
-        ApiError::spec_invalid(format!(
-            "{EXTENSIONS_HEADER} deve essere testo UTF-8 valido"
+fn validate_backend_extensions_schema(
+    backend_id: &str,
+    schema_raw: &str,
+    extensions: &Value,
+) -> Result<(), ApiError> {
+    let schema_json: Value = serde_json::from_str(schema_raw).map_err(|e| {
+        ApiError::internal(format!(
+            "schema extensions non valida per backend {backend_id}: {e}"
         ))
     })?;
-    let value: Value = serde_json::from_str(raw).map_err(|e| {
-        ApiError::spec_invalid(format!(
-            "{EXTENSIONS_HEADER} deve contenere un JSON object valido: {e}"
-        ))
-    })?;
+    let compiled = jsonschema::JSONSchema::options()
+        .compile(&schema_json)
+        .map_err(|e| {
+            ApiError::internal(format!(
+                "schema extensions non compilabile per backend {backend_id}: {e}"
+            ))
+        })?;
 
-    if !value.is_object() {
+    if let Err(errors) = compiled.validate(extensions) {
+        let validation_errors: Vec<_> = errors
+            .map(|issue| {
+                json!({
+                    "path": extension_path(&issue.instance_path.to_string()),
+                    "message": issue.to_string(),
+                })
+            })
+            .collect();
         return Err(ApiError::spec_invalid(format!(
-            "{EXTENSIONS_HEADER} deve contenere un JSON object"
-        )));
+            "extensions non valide per backend {backend_id}"
+        ))
+        .with_details(json!({
+            "backend": backend_id,
+            "validationErrors": validation_errors,
+        })));
     }
 
-    Ok(Some(value))
+    Ok(())
 }
 
 pub async fn create_sandbox(
@@ -178,12 +217,10 @@ pub async fn create_sandbox(
     }
 
     let raw_spec = parse_spec_body(&headers, &body)?;
-    let hidden_extensions = parse_hidden_extensions(&headers)?;
     // Keep the original submission for audit — reserialise as JSON so the
     // DB column format stays stable even when clients sent YAML.
     let spec_json = serde_json::to_string(&raw_spec)?;
-    let mut ir = compile_value(raw_spec)?;
-    ir.extensions = hidden_extensions;
+    let ir = compile_value(raw_spec)?;
 
     let lease_token = uuid::Uuid::new_v4().to_string();
     let (backend_id, backend) = state.registry.select(&ir).map_err(|e| {
@@ -192,6 +229,14 @@ pub async fn create_sandbox(
             e.to_string(),
         )
     })?;
+    if let (Some(extensions), Some(descriptor)) = (
+        ir.extensions.as_ref(),
+        state.registry.available_descriptor(&backend_id),
+    ) {
+        if let Some(schema) = descriptor.extensions_schema {
+            validate_backend_extensions_schema(&backend_id, schema, extensions)?;
+        }
+    }
     backend.can_satisfy(&ir).await?;
 
     let row = store::insert_sandbox(
@@ -695,6 +740,7 @@ mod tests {
     }
 
     struct MockBackend {
+        backend_id: &'static str,
         inspect_behavior: InspectBehavior,
         destroyed: Arc<Mutex<Vec<String>>>,
         last_extensions: Arc<Mutex<Option<Value>>>,
@@ -730,7 +776,7 @@ mod tests {
                     state: status.clone(),
                     created_at: Utc::now(),
                     expires_at: Utc::now(),
-                    backend_id: "mock".into(),
+                    backend_id: self.backend_id.into(),
                 }),
                 InspectBehavior::NotFound => Err(BackendError::NotFound("missing".into())),
             }
@@ -757,16 +803,18 @@ mod tests {
     }
 
     struct MockFactory {
+        backend_id: &'static str,
         inspect_behavior: InspectBehavior,
         destroyed: Arc<Mutex<Vec<String>>>,
         last_extensions: Arc<Mutex<Option<Value>>>,
         allow_extensions: bool,
+        extensions_schema: Option<&'static str>,
     }
 
     impl BackendFactory for MockFactory {
         fn describe(&self) -> BackendDescriptor {
             BackendDescriptor {
-                id: "mock",
+                id: self.backend_id,
                 display_name: "Mock",
                 version: "test",
                 trait_version: agentsandbox_sdk::BACKEND_TRAIT_VERSION,
@@ -774,7 +822,7 @@ mod tests {
                     isolation_level: IsolationLevel::Process,
                     ..BackendCapabilities::default()
                 },
-                extensions_schema: self.allow_extensions.then_some("{}"),
+                extensions_schema: self.extensions_schema,
             }
         }
 
@@ -783,6 +831,7 @@ mod tests {
             _config: &HashMap<String, String>,
         ) -> Result<Box<dyn SandboxBackend>, BackendError> {
             Ok(Box::new(MockBackend {
+                backend_id: self.backend_id,
                 inspect_behavior: match &self.inspect_behavior {
                     InspectBehavior::Status(state) => InspectBehavior::Status(state.clone()),
                     InspectBehavior::NotFound => InspectBehavior::NotFound,
@@ -819,6 +868,31 @@ mod tests {
         pool
     }
 
+    async fn test_state_with_factory(
+        db: SqlitePool,
+        factory: MockFactory,
+    ) -> (
+        Arc<AppState>,
+        Arc<Mutex<Vec<String>>>,
+        Arc<Mutex<Option<Value>>>,
+    ) {
+        let mut registry = BackendRegistry::new();
+        let destroyed = factory.destroyed.clone();
+        let last_extensions = factory.last_extensions.clone();
+        registry.register(&factory);
+        registry.initialize(&factory, &HashMap::new()).await;
+        (
+            Arc::new(AppState {
+                db,
+                config: test_config(AuthMode::SingleUser, factory.backend_id),
+                registry: Arc::new(registry),
+                metrics: Metrics::new(),
+            }),
+            destroyed,
+            last_extensions,
+        )
+    }
+
     async fn test_state(
         db: SqlitePool,
         inspect_behavior: InspectBehavior,
@@ -831,23 +905,15 @@ mod tests {
         let destroyed = Arc::new(Mutex::new(Vec::new()));
         let last_extensions = Arc::new(Mutex::new(None));
         let factory = MockFactory {
+            backend_id: "mock",
             inspect_behavior,
             destroyed: destroyed.clone(),
             last_extensions: last_extensions.clone(),
             allow_extensions: false,
+            extensions_schema: None,
         };
-        registry.register(&factory);
-        registry.initialize(&factory, &HashMap::new()).await;
-        (
-            Arc::new(AppState {
-                db,
-                config: test_config(AuthMode::SingleUser),
-                registry: Arc::new(registry),
-                metrics: Metrics::new(),
-            }),
-            destroyed,
-            last_extensions,
-        )
+        let _ = registry;
+        test_state_with_factory(db, factory).await
     }
 
     async fn test_state_with_extensions(
@@ -862,26 +928,41 @@ mod tests {
         let destroyed = Arc::new(Mutex::new(Vec::new()));
         let last_extensions = Arc::new(Mutex::new(None));
         let factory = MockFactory {
+            backend_id: "mock",
             inspect_behavior,
             destroyed: destroyed.clone(),
             last_extensions: last_extensions.clone(),
             allow_extensions: true,
+            extensions_schema: Some("{}"),
         };
-        registry.register(&factory);
-        registry.initialize(&factory, &HashMap::new()).await;
-        (
-            Arc::new(AppState {
-                db,
-                config: test_config(AuthMode::SingleUser),
-                registry: Arc::new(registry),
-                metrics: Metrics::new(),
-            }),
-            destroyed,
-            last_extensions,
-        )
+        let _ = registry;
+        test_state_with_factory(db, factory).await
     }
 
-    fn test_config(mode: AuthMode) -> DaemonConfig {
+    async fn test_state_for_backend_with_schema(
+        db: SqlitePool,
+        inspect_behavior: InspectBehavior,
+        backend_id: &'static str,
+        extensions_schema: Option<&'static str>,
+    ) -> (
+        Arc<AppState>,
+        Arc<Mutex<Vec<String>>>,
+        Arc<Mutex<Option<Value>>>,
+    ) {
+        let destroyed = Arc::new(Mutex::new(Vec::new()));
+        let last_extensions = Arc::new(Mutex::new(None));
+        let factory = MockFactory {
+            backend_id,
+            inspect_behavior,
+            destroyed: destroyed.clone(),
+            last_extensions: last_extensions.clone(),
+            allow_extensions: extensions_schema.is_some(),
+            extensions_schema,
+        };
+        test_state_with_factory(db, factory).await
+    }
+
+    fn test_config(mode: AuthMode, backend_id: &str) -> DaemonConfig {
         DaemonConfig {
             daemon: DaemonSection {
                 host: "127.0.0.1".into(),
@@ -894,7 +975,7 @@ mod tests {
             },
             auth: AuthSection { mode },
             backends: BackendsSection {
-                enabled: vec!["mock".into()],
+                enabled: vec![backend_id.into()],
                 bubblewrap: Default::default(),
                 docker: Default::default(),
                 gvisor: Default::default(),
@@ -1209,7 +1290,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_sandbox_accepts_hidden_extensions_header() {
+    async fn create_sandbox_accepts_extensions_in_spec() {
         let db = test_db().await;
         let (state, _, last_extensions) =
             test_state_with_extensions(db, InspectBehavior::Status(SandboxState::Running)).await;
@@ -1221,12 +1302,8 @@ mod tests {
                     .method("POST")
                     .uri("/v1/sandboxes")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .header(
-                        EXTENSIONS_HEADER,
-                        r#"{"gvisor":{"network":"host"}}"#,
-                    )
                     .body(Body::from(
-                        r#"{"apiVersion":"sandbox.ai/v1","kind":"Sandbox","metadata":{},"spec":{"runtime":{"preset":"python"}}}"#,
+                        r#"{"apiVersion":"sandbox.ai/v1","kind":"Sandbox","metadata":{},"spec":{"runtime":{"preset":"python"},"scheduling":{"backend":"mock"},"extensions":{"mock":{"debug":true}}}}"#,
                     ))
                     .unwrap(),
             )
@@ -1235,14 +1312,11 @@ mod tests {
 
         assert_eq!(response.status(), axum::http::StatusCode::CREATED);
         let captured = last_extensions.lock().unwrap().clone();
-        assert_eq!(
-            captured,
-            Some(serde_json::json!({"gvisor":{"network":"host"}}))
-        );
+        assert_eq!(captured, Some(serde_json::json!({"mock":{"debug":true}})));
     }
 
     #[tokio::test]
-    async fn create_sandbox_rejects_non_object_hidden_extensions_header() {
+    async fn create_sandbox_rejects_extensions_without_backend() {
         let db = test_db().await;
         let (state, _, _) = test_state(db, InspectBehavior::Status(SandboxState::Running)).await;
         let app = router::build(state);
@@ -1253,9 +1327,8 @@ mod tests {
                     .method("POST")
                     .uri("/v1/sandboxes")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .header(EXTENSIONS_HEADER, r#"["not-an-object"]"#)
                     .body(Body::from(
-                        r#"{"apiVersion":"sandbox.ai/v1","kind":"Sandbox","metadata":{},"spec":{"runtime":{"preset":"python"}}}"#,
+                        r#"{"apiVersion":"sandbox.ai/v1","kind":"Sandbox","metadata":{},"spec":{"runtime":{"preset":"python"},"extensions":{"docker":{"hostConfig":{"capAdd":["NET_ADMIN"]}}}}}"#,
                     ))
                     .unwrap(),
             )
@@ -1266,6 +1339,91 @@ mod tests {
             response.status(),
             axum::http::StatusCode::UNPROCESSABLE_ENTITY
         );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert!(payload["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("scheduling.backend"));
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_rejects_invalid_docker_extensions_field() {
+        let db = test_db().await;
+        let (state, _, _) = test_state_for_backend_with_schema(
+            db,
+            InspectBehavior::Status(SandboxState::Running),
+            "docker",
+            Some(include_str!(
+                "../../agentsandbox-backend-docker/schema/extensions.schema.json"
+            )),
+        )
+        .await;
+        let app = router::build(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"apiVersion":"sandbox.ai/v1","kind":"Sandbox","metadata":{},"spec":{"runtime":{"preset":"python"},"scheduling":{"backend":"docker"},"extensions":{"docker":{"hostConfig":{"unknownField":true}}}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let errors = payload["error"]["details"]["validationErrors"]
+            .as_array()
+            .unwrap();
+        assert!(errors
+            .iter()
+            .any(|issue| issue["message"].as_str().unwrap().contains("unknownField")));
+    }
+
+    #[tokio::test]
+    async fn get_backend_extensions_schema_returns_json_schema() {
+        let db = test_db().await;
+        let (state, _, _) = test_state_for_backend_with_schema(
+            db,
+            InspectBehavior::Status(SandboxState::Running),
+            "docker",
+            Some(include_str!(
+                "../../agentsandbox-backend-docker/schema/extensions.schema.json"
+            )),
+        )
+        .await;
+        let app = router::build(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/backends/docker/extensions-schema")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["title"], "Docker Backend Extensions");
     }
 
     #[tokio::test]

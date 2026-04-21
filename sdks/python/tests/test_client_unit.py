@@ -249,3 +249,10 @@ async def test_exec_before_enter_raises():
     sb = Sandbox(runtime="python")
     with pytest.raises(SandboxError):
         await sb.exec("echo hi")
+
+
+def test_extensions_require_backend():
+    with pytest.raises(ValueError) as info:
+        Sandbox(runtime="python", extensions={})
+
+    assert "backend esplicito" in str(info.value)

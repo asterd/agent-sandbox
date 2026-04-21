@@ -32,6 +32,7 @@ pub struct SandboxSpecBody {
     pub secrets: Option<Vec<SecretRef>>,
     pub ttl_seconds: Option<u64>,
     pub scheduling: Option<SchedulingSpec>,
+    pub extensions: Option<Value>,
     pub storage: Option<StorageSpec>,
     pub observability: Option<ObservabilitySpec>,
 }

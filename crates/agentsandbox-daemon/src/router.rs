@@ -14,6 +14,10 @@ pub fn build(state: SharedState) -> Router {
         .route("/metrics", get(handlers::metrics))
         .route("/v1/health", get(handlers::health))
         .route("/v1/backends", get(handlers::list_backends))
+        .route(
+            "/v1/backends/:id/extensions-schema",
+            get(handlers::get_backend_extensions_schema),
+        )
         .route("/v1/sandboxes", post(handlers::create_sandbox))
         .route("/v1/sandboxes", get(handlers::list_sandboxes))
         .route("/v1/sandboxes/:id", get(handlers::inspect_sandbox))
