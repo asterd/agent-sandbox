@@ -40,6 +40,7 @@ name = "agentsandbox-backend-docker"
 version = "0.1.0"
 dependencies = [
  "agentsandbox-conformance",
+ "agentsandbox-proxy",
  "agentsandbox-sdk",
  "anyhow",
  "async-trait",
@@ -176,6 +177,15 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "agentsandbox-proxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

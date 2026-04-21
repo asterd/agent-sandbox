@@ -1,10 +1,8 @@
-#[doc(hidden)]
-pub mod egress;
-
 mod factory;
 
 pub use factory::DockerBackendFactory;
 
+use agentsandbox_proxy::{EgressProxy, RunningEgressProxy};
 use agentsandbox_sdk::{
     backend::{ExecResult, ResourceUsage, SandboxBackend, SandboxState, SandboxStatus},
     error::BackendError,
@@ -20,9 +18,8 @@ use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::models::{DeviceMapping, HostConfig, ResourcesUlimits};
 use bollard::Docker;
 use chrono::{DateTime, Utc};
-use egress::apply_egress_rules;
 use futures::StreamExt;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Mutex};
 use tokio::time::{timeout, Duration};
 
 const CONTAINER_NAME_PREFIX: &str = "agentsandbox-";
@@ -33,6 +30,7 @@ const ID_LABEL: &str = "ai.sandbox.id";
 pub struct DockerBackend {
     client: Docker,
     runtime: Option<String>,
+    proxy_tasks: Mutex<HashMap<String, RunningEgressProxy>>,
 }
 
 impl DockerBackend {
@@ -40,11 +38,16 @@ impl DockerBackend {
         Self {
             client,
             runtime: None,
+            proxy_tasks: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn with_runtime(client: Docker, runtime: Option<String>) -> Self {
-        Self { client, runtime }
+        Self {
+            client,
+            runtime,
+            proxy_tasks: Mutex::new(HashMap::new()),
+        }
     }
 
     fn container_name(sandbox_id: &str) -> String {
@@ -77,6 +80,35 @@ impl DockerBackend {
         ir.egress.mode == EgressMode::Proxy
             && ir.egress.deny_by_default
             && !ir.egress.allow_hostnames.is_empty()
+    }
+
+    fn configure_proxy_env(env: &mut Vec<String>, host_config: &mut HostConfig, proxy_port: u16) {
+        let http_proxy_url = format!("http://host.docker.internal:{proxy_port}");
+        let socks_proxy_url = format!("socks5h://host.docker.internal:{proxy_port}");
+        env.push(format!("HTTP_PROXY={http_proxy_url}"));
+        env.push(format!("HTTPS_PROXY={http_proxy_url}"));
+        env.push(format!("ALL_PROXY={socks_proxy_url}"));
+        env.push("NO_PROXY=127.0.0.1,localhost".to_string());
+
+        let extra_host = "host.docker.internal:host-gateway".to_string();
+        match &mut host_config.extra_hosts {
+            Some(extra_hosts) => {
+                if !extra_hosts.iter().any(|value| value == &extra_host) {
+                    extra_hosts.push(extra_host);
+                }
+            }
+            None => host_config.extra_hosts = Some(vec![extra_host]),
+        }
+    }
+
+    fn register_proxy_task(&self, handle: String, proxy: RunningEgressProxy) {
+        self.proxy_tasks.lock().unwrap().insert(handle, proxy);
+    }
+
+    fn abort_proxy_task(&self, handle: &str) {
+        if let Some(proxy) = self.proxy_tasks.lock().unwrap().remove(handle) {
+            proxy.abort();
+        }
     }
 
     fn map_missing(e: BollardError, handle: &str) -> BackendError {
@@ -254,7 +286,6 @@ impl SandboxBackend for DockerBackend {
             network_mode: Some(Self::network_mode_for(ir).to_string()),
             runtime: self.runtime.clone(),
             auto_remove: Some(false),
-            cap_add: Self::should_apply_egress_rules(ir).then(|| vec!["NET_ADMIN".to_string()]),
             ..Default::default()
         };
 
@@ -293,6 +324,18 @@ impl SandboxBackend for DockerBackend {
             }
         }
 
+        let proxy = if Self::should_apply_egress_rules(ir) {
+            let proxy = EgressProxy::start(ir.id.clone(), ir.egress.allow_hostnames.clone())
+                .await
+                .map_err(|error| {
+                    BackendError::Internal(format!("impossibile avviare egress proxy: {error}"))
+                })?;
+            Self::configure_proxy_env(&mut env, &mut host_config, proxy.port());
+            Some(proxy)
+        } else {
+            None
+        };
+
         let container_config = Config {
             image: Some(ir.image.clone()),
             env: Some(env),
@@ -308,7 +351,7 @@ impl SandboxBackend for DockerBackend {
         };
 
         let name = Self::container_name(&ir.id);
-        let container = self
+        let container = match self
             .client
             .create_container(
                 Some(CreateContainerOptions {
@@ -318,31 +361,39 @@ impl SandboxBackend for DockerBackend {
                 container_config,
             )
             .await
-            .map_err(|e| BackendError::Internal(e.to_string()))?;
+        {
+            Ok(container) => container,
+            Err(error) => {
+                if let Some(proxy) = proxy {
+                    proxy.abort();
+                }
+                return Err(BackendError::Internal(error.to_string()));
+            }
+        };
 
-        self.client
+        if let Err(error) = self
+            .client
             .start_container(&container.id, None::<StartContainerOptions<String>>)
             .await
-            .map_err(|e| BackendError::Internal(e.to_string()))?;
-
-        if Self::should_apply_egress_rules(ir) {
-            if let Err(error) =
-                apply_egress_rules(&self.client, &name, &ir.egress.allow_hostnames).await
-            {
-                let _ = self
-                    .client
-                    .remove_container(
-                        &name,
-                        Some(RemoveContainerOptions {
-                            force: true,
-                            ..Default::default()
-                        }),
-                    )
-                    .await;
-                return Err(BackendError::Internal(format!(
-                    "impossibile applicare network.egress: {error}"
-                )));
+        {
+            if let Some(proxy) = proxy {
+                proxy.abort();
             }
+            let _ = self
+                .client
+                .remove_container(
+                    &name,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await;
+            return Err(BackendError::Internal(error.to_string()));
+        }
+
+        if let Some(proxy) = proxy {
+            self.register_proxy_task(container.id.clone(), proxy);
         }
 
         Ok(container.id)
@@ -447,6 +498,10 @@ impl SandboxBackend for DockerBackend {
     }
 
     async fn destroy(&self, handle: &str) -> Result<(), BackendError> {
+        self.abort_proxy_task(handle);
+        if let Some(legacy_name) = Self::legacy_container_name(handle) {
+            self.abort_proxy_task(&legacy_name);
+        }
         self.remove_container_with_fallback(handle).await
     }
 
@@ -490,6 +545,40 @@ mod tests {
         };
         assert_eq!(DockerBackend::network_mode_for(&ir), "bridge");
         assert!(DockerBackend::should_apply_egress_rules(&ir));
+    }
+
+    #[test]
+    fn configure_proxy_env_injects_proxy_variables_and_host_gateway() {
+        let mut env = Vec::new();
+        let mut host_config = HostConfig::default();
+
+        DockerBackend::configure_proxy_env(&mut env, &mut host_config, 43123);
+
+        assert!(env.contains(&"HTTP_PROXY=http://host.docker.internal:43123".to_string()));
+        assert!(env.contains(&"HTTPS_PROXY=http://host.docker.internal:43123".to_string()));
+        assert!(env.contains(&"ALL_PROXY=socks5h://host.docker.internal:43123".to_string()));
+        assert!(env.contains(&"NO_PROXY=127.0.0.1,localhost".to_string()));
+        assert_eq!(
+            host_config.extra_hosts,
+            Some(vec!["host.docker.internal:host-gateway".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn abort_proxy_task_unregisters_running_proxy() {
+        let client =
+            Docker::connect_with_unix("/var/run/docker.sock", 30, bollard::API_DEFAULT_VERSION)
+                .unwrap();
+        let backend = DockerBackend::with_client(client);
+        let proxy = EgressProxy::start("sandbox-1".into(), vec!["localhost".into()])
+            .await
+            .unwrap();
+
+        backend.register_proxy_task("handle-1".into(), proxy);
+        assert_eq!(backend.proxy_tasks.lock().unwrap().len(), 1);
+
+        backend.abort_proxy_task("handle-1");
+        assert!(backend.proxy_tasks.lock().unwrap().is_empty());
     }
 
     #[test]

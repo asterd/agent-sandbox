@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/agentsandbox-agent",
+    "crates/agentsandbox-proxy",
     "crates/agentsandbox-sdk",
     "crates/agentsandbox-conformance",
     "crates/agentsandbox-core",

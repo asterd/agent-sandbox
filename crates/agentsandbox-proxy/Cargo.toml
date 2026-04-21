@@ -1,0 +1,12 @@
+[package]
+name = "agentsandbox-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "SOCKS5 egress proxy for AgentSandbox"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
