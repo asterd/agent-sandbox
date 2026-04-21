@@ -25,7 +25,7 @@ The repository already contains a working base for:
 Important current limitations:
 
 - the only available backend is Docker
-- the egress allowlist is validated in the spec, but is not yet enforced as a real filter in Docker when networking is enabled
+- Docker egress filtering in `v1alpha1` is hostname-based, resolved once at sandbox startup, and enforced with container-local `iptables`
 - the documentation in `ROADMAP.md` goes beyond the current state of the repository
 
 ## Architecture

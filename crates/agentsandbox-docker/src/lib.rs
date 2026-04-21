@@ -6,20 +6,24 @@
 //! to `docker exec`. Container handles never leak out — the daemon only ever
 //! sees the IR id.
 
+#[doc(hidden)]
+pub mod egress;
+
 use agentsandbox_core::adapter::{
     AdapterError, ExecResult, SandboxAdapter, SandboxInfo, SandboxStatus,
 };
 use agentsandbox_core::ir::SandboxIR;
 use async_trait::async_trait;
 use bollard::container::{
-    Config, CreateContainerOptions, InspectContainerOptions, LogOutput,
-    RemoveContainerOptions, StartContainerOptions,
+    Config, CreateContainerOptions, InspectContainerOptions, LogOutput, RemoveContainerOptions,
+    StartContainerOptions,
 };
 use bollard::errors::Error as BollardError;
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::models::HostConfig;
 use bollard::Docker;
 use chrono::{DateTime, Utc};
+use egress::apply_egress_rules;
 use futures::StreamExt;
 use std::collections::HashMap;
 
@@ -56,23 +60,19 @@ impl DockerAdapter {
     /// Pick a Docker network mode for this IR.
     ///
     /// * `deny_by_default=true` + no allow list → `none` (fully offline).
-    /// * `deny_by_default=false` OR any allow list → `bridge` with a loud
-    ///   warning, because v1alpha1 does NOT yet enforce the allowlist.
-    ///   Fase 6 replaces this with a real L4 filter; do not silently
-    ///   degrade — the whole point of egress rules is defence in depth.
+    /// * Everything else → `bridge`. When `deny_by_default=true` and the
+    ///   allowlist is non-empty, Fase 6 installs container-local iptables
+    ///   rules immediately after container startup.
     fn network_mode_for(ir: &SandboxIR) -> &'static str {
         if ir.deny_by_default && ir.egress_allow.is_empty() {
             "none"
         } else {
-            tracing::warn!(
-                sandbox_id = %ir.id,
-                allow = ?ir.egress_allow,
-                deny_by_default = ir.deny_by_default,
-                "egress allowlist non ancora applicata in v1alpha1-docker: \
-                 la sandbox avrà accesso di rete non filtrato. Vedi Fase 6."
-            );
             "bridge"
         }
+    }
+
+    fn should_apply_egress_rules(ir: &SandboxIR) -> bool {
+        ir.deny_by_default && !ir.egress_allow.is_empty()
     }
 
     fn map_inspect_err(e: BollardError, sandbox_id: &str) -> AdapterError {
@@ -102,11 +102,7 @@ impl SandboxAdapter for DockerAdapter {
         // Flatten env + secret_env: Docker has a single ENV concept. Secrets
         // are already resolved; they never appear in logs because SandboxIR
         // redacts them in Debug.
-        let mut env: Vec<String> = ir
-            .env
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect();
+        let mut env: Vec<String> = ir.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
         env.extend(ir.secret_env.iter().map(|(k, v)| format!("{k}={v}")));
 
         let mut labels = HashMap::new();
@@ -118,6 +114,15 @@ impl SandboxAdapter for DockerAdapter {
             nano_cpus: Some(i64::from(ir.cpu_millicores) * 1_000_000),
             network_mode: Some(Self::network_mode_for(ir).to_string()),
             auto_remove: Some(false),
+            // NET_ADMIN serve a `iptables` per installare la policy egress,
+            // ma Docker non permette di droppare una capability a runtime: una
+            // volta concessa, resta viva finche' il container esiste. Non e'
+            // una regressione di sicurezza — il payload nella sandbox potrebbe
+            // riscrivere le regole comunque, ma e' un effetto collaterale da
+            // tenere a mente se in futuro esporremo la sandbox a codice meno
+            // fidato. v1beta1 spostera' l'enforcement fuori dal container
+            // (proxy L4 dedicato) ed eliminera' questa capability.
+            cap_add: Self::should_apply_egress_rules(ir).then(|| vec!["NET_ADMIN".to_string()]),
             ..Default::default()
         };
 
@@ -150,6 +155,25 @@ impl SandboxAdapter for DockerAdapter {
             .start_container(&container.id, None::<StartContainerOptions<String>>)
             .await
             .map_err(|e| AdapterError::Internal(e.to_string()))?;
+
+        if Self::should_apply_egress_rules(ir) {
+            if let Err(err) = apply_egress_rules(&self.client, &name, &ir.egress_allow).await {
+                let _ = self
+                    .client
+                    .remove_container(
+                        &name,
+                        Some(RemoveContainerOptions {
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await;
+
+                return Err(AdapterError::Internal(format!(
+                    "impossibile applicare network.egress: {err}"
+                )));
+            }
+        }
 
         Ok(ir.id.clone())
     }
@@ -302,6 +326,25 @@ mod tests {
             ..SandboxIR::default()
         };
         assert_eq!(DockerAdapter::network_mode_for(&ir), "bridge");
+    }
+
+    #[test]
+    fn should_apply_egress_rules_only_for_deny_by_default_allowlists() {
+        let ir = SandboxIR {
+            egress_allow: vec!["pypi.org".into()],
+            ..SandboxIR::default()
+        };
+        assert!(DockerAdapter::should_apply_egress_rules(&ir));
+
+        let open_ir = SandboxIR {
+            deny_by_default: false,
+            egress_allow: vec!["pypi.org".into()],
+            ..SandboxIR::default()
+        };
+        assert!(!DockerAdapter::should_apply_egress_rules(&open_ir));
+
+        let offline_ir = SandboxIR::default();
+        assert!(!DockerAdapter::should_apply_egress_rules(&offline_ir));
     }
 
     #[test]

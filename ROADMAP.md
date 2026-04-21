@@ -1482,6 +1482,11 @@ L'approccio è hostname allowlist applicata **a startup**, non real-time. I limi
 
 **Implementazione con iptables + DNS pre-risolto:**
 
+> Nota di coerenza: questo approccio richiede che il runtime guest abbia
+> `iptables` disponibile. Se la sandbox richiede una allowlist ma il runtime
+> non puo' applicarla in modo sicuro, la creazione deve fallire invece di
+> degradare silenziosamente a rete aperta.
+
 ```rust
 // crates/agentsandbox-docker/src/egress.rs
 

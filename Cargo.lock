@@ -42,6 +42,7 @@ name = "agentsandbox-docker"
 version = "0.1.0"
 dependencies = [
  "agentsandbox-core",
+ "anyhow",
  "async-trait",
  "bollard",
  "chrono",
