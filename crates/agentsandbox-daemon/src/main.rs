@@ -3,15 +3,16 @@
 //! Boot sequence:
 //!   1. tracing subscriber (env-filter driven)
 //!   2. open (or create) the SQLite DB and run migrations
-//!   3. connect to the backend adapter and health-check it
+//!   3. initialize the backend registry and health-check plugins
 //!   4. spawn the TTL reaper
 //!   5. serve the v1 API on 127.0.0.1:7847
 
 use std::sync::Arc;
 
-use agentsandbox_core::SandboxAdapter;
-use agentsandbox_daemon::{config::load_config, reaper, router, state::AppState};
-use agentsandbox_docker::DockerAdapter;
+use agentsandbox_backend_docker::DockerBackendFactory;
+use agentsandbox_daemon::{
+    config::load_config, reaper, registry::BackendRegistry, router, state::AppState,
+};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
 
@@ -37,12 +38,28 @@ async fn main() -> anyhow::Result<()> {
     let db = SqlitePoolOptions::new().connect_with(options).await?;
     sqlx::migrate!("./migrations").run(&db).await?;
 
-    let adapter = Arc::new(DockerAdapter::new()?);
-    adapter.health_check().await?;
+    let mut registry = BackendRegistry::new();
+    for backend_id in &cfg.backends.enabled {
+        let backend_config = cfg.backends.config_for(backend_id);
+        match backend_id.as_str() {
+            "docker" => {
+                let factory = DockerBackendFactory;
+                registry.register(&factory);
+                registry.initialize(&factory, &backend_config).await;
+            }
+            other => {
+                tracing::warn!(backend_id = %other, "backend non riconosciuto");
+            }
+        }
+    }
+
+    if registry.list_available().is_empty() {
+        anyhow::bail!("nessun backend disponibile");
+    }
 
     let state = Arc::new(AppState {
         db,
-        adapter: adapter.clone(),
+        registry: Arc::new(registry),
     });
 
     let reaper_state = state.clone();

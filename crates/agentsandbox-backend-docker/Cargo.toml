@@ -1,0 +1,23 @@
+[package]
+name = "agentsandbox-backend-docker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Docker backend plugin for AgentSandbox"
+
+[dependencies]
+agentsandbox-sdk = { path = "../agentsandbox-sdk" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+bollard = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+agentsandbox-conformance = { path = "../agentsandbox-conformance" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -10,6 +10,7 @@ pub mod config;
 pub mod error;
 pub mod handlers;
 pub mod reaper;
+pub mod registry;
 pub mod router;
 pub mod state;
 pub mod store;

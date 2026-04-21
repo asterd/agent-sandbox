@@ -3,27 +3,50 @@
 version = 3
 
 [[package]]
+name = "agentsandbox-backend-docker"
+version = "0.1.0"
+dependencies = [
+ "agentsandbox-conformance",
+ "agentsandbox-sdk",
+ "anyhow",
+ "async-trait",
+ "bollard",
+ "chrono",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "agentsandbox-conformance"
+version = "0.1.0"
+dependencies = [
+ "agentsandbox-sdk",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "agentsandbox-core"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "chrono",
+ "agentsandbox-sdk",
  "jsonschema",
  "serde",
  "serde_json",
  "serde_yaml",
  "thiserror",
- "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]
 name = "agentsandbox-daemon"
 version = "0.1.0"
 dependencies = [
+ "agentsandbox-backend-docker",
  "agentsandbox-core",
- "agentsandbox-docker",
+ "agentsandbox-sdk",
  "anyhow",
  "async-trait",
  "axum",
@@ -43,18 +66,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentsandbox-docker"
+name = "agentsandbox-sdk"
 version = "0.1.0"
 dependencies = [
- "agentsandbox-core",
- "anyhow",
  "async-trait",
- "bollard",
  "chrono",
- "futures",
+ "serde",
+ "serde_json",
  "thiserror",
- "tokio",
- "tracing",
+ "uuid",
 ]
 
 [[package]]

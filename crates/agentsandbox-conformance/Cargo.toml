@@ -1,0 +1,12 @@
+[package]
+name = "agentsandbox-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Backend conformance suite for AgentSandbox"
+
+[dependencies]
+agentsandbox-sdk = { path = "../agentsandbox-sdk" }
+tokio = { workspace = true }
+uuid = { workspace = true }

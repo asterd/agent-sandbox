@@ -1,28 +1,27 @@
-//! Core types, spec parser and IR for AgentSandbox.
+//! Spec parser and compile pipeline for AgentSandbox.
 //!
-//! This crate defines the public sandbox specification (`spec`), the internal
-//! intermediate representation (`ir`) that backend adapters consume, the
-//! `compile` pipeline that turns one into the other, and the [`SandboxAdapter`]
-//! contract every backend implements. Nothing here is backend-specific:
-//! Docker, Firecracker or any future backend depends on `ir::SandboxIR` and
-//! never on the raw spec.
+//! This crate owns the public sandbox specification (`spec`) and the compile
+//! pipeline that turns it into the backend-facing IR exposed by
+//! `agentsandbox-sdk`. Backend plugins depend on the SDK, not on this crate.
 
-pub mod adapter;
 pub mod compile;
-pub mod ir;
 pub mod schema;
 pub mod spec;
 
-#[cfg(feature = "conformance")]
-pub mod conformance;
+pub mod backend {
+    pub use agentsandbox_sdk::backend::*;
+}
 
-pub use adapter::{AdapterError, ExecResult, SandboxAdapter, SandboxInfo, SandboxStatus};
+pub mod ir {
+    pub use agentsandbox_sdk::ir::*;
+}
+
 pub use compile::{
     compile, compile_any, compile_value, detect_version, CompileError, SpecVersion, ValidationIssue,
 };
 pub use ir::SandboxIR;
 pub use spec::{
-    AuditLevel, EgressMode, EgressPolicy, Metadata, NetworkSpec, ObservabilitySpec, ResourceSpec,
-    RuntimePreset, RuntimeSpec, SandboxSpec, SandboxSpecBody, SchedulingPriority, SchedulingSpec,
-    SecretRef, SecretSource, StorageSpec, API_VERSION_V1,
+    EgressPolicy, Metadata, NetworkSpec, ObservabilitySpec, ResourceSpec, RuntimePreset,
+    RuntimeSpec, SandboxSpec, SandboxSpecBody, SchedulingSpec, SecretRef, SecretSource,
+    StorageSpec, API_VERSION_V1,
 };

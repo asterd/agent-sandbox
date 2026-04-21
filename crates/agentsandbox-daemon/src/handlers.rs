@@ -4,7 +4,9 @@
 //! its result into a JSON body and lets the [`ApiError`] extractor do the
 //! status-code mapping; handlers never call `StatusCode` directly.
 
-use agentsandbox_core::{compile_value, AdapterError, SandboxStatus};
+use agentsandbox_core::compile_value;
+use agentsandbox_sdk::backend::{BackendCapabilities, SandboxState};
+use agentsandbox_sdk::error::BackendError;
 use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap},
@@ -24,7 +26,82 @@ const LEASE_HEADER: &str = "X-Lease-Token";
 // ---------- /v1/health ----------
 
 pub async fn health(State(state): State<SharedState>) -> Json<Value> {
-    Json(json!({ "status": "ok", "backend": state.adapter.backend_name() }))
+    let backends: Vec<_> = state
+        .registry
+        .list_available()
+        .into_iter()
+        .map(|descriptor| descriptor.id)
+        .collect();
+    let primary_backend = backends.first().copied().unwrap_or("unavailable");
+    Json(json!({
+        "status": "ok",
+        "backend": primary_backend,
+        "backends": backends,
+    }))
+}
+
+#[derive(Serialize)]
+pub struct BackendResponse {
+    pub id: String,
+    pub display_name: String,
+    pub version: String,
+    pub trait_version: String,
+    pub capabilities: BackendCapabilitiesResponse,
+    pub extensions_supported: bool,
+}
+
+#[derive(Serialize)]
+pub struct BackendCapabilitiesResponse {
+    pub network_isolation: bool,
+    pub memory_hard_limit: bool,
+    pub cpu_hard_limit: bool,
+    pub persistent_storage: bool,
+    pub self_contained: bool,
+    pub isolation_level: String,
+    pub supported_presets: Vec<String>,
+    pub rootless: bool,
+    pub snapshot_restore: bool,
+}
+
+impl From<&BackendCapabilities> for BackendCapabilitiesResponse {
+    fn from(value: &BackendCapabilities) -> Self {
+        Self {
+            network_isolation: value.network_isolation,
+            memory_hard_limit: value.memory_hard_limit,
+            cpu_hard_limit: value.cpu_hard_limit,
+            persistent_storage: value.persistent_storage,
+            self_contained: value.self_contained,
+            isolation_level: format!("{:?}", value.isolation_level),
+            supported_presets: value
+                .supported_presets
+                .iter()
+                .map(|preset| (*preset).to_string())
+                .collect(),
+            rootless: value.rootless,
+            snapshot_restore: value.snapshot_restore,
+        }
+    }
+}
+
+pub async fn list_backends(State(state): State<SharedState>) -> Json<Value> {
+    let items: Vec<_> = state
+        .registry
+        .list_available()
+        .into_iter()
+        .map(|descriptor| {
+            serde_json::to_value(BackendResponse {
+                id: descriptor.id.to_string(),
+                display_name: descriptor.display_name.to_string(),
+                version: descriptor.version.to_string(),
+                trait_version: descriptor.trait_version().to_string(),
+                capabilities: BackendCapabilitiesResponse::from(&descriptor.capabilities),
+                extensions_supported: descriptor.extensions_schema.is_some(),
+            })
+            .expect("backend descriptor deve essere serializzabile")
+        })
+        .collect();
+
+    Json(json!({ "items": items }))
 }
 
 // ---------- POST /v1/sandboxes ----------
@@ -65,14 +142,18 @@ pub async fn create_sandbox(
     let ir = compile_value(raw_spec)?;
 
     let lease_token = uuid::Uuid::new_v4().to_string();
-    let backend = state.adapter.backend_name();
+    let (backend_id, backend) = state
+        .registry
+        .select(&ir)
+        .map_err(|e| ApiError::new(crate::error::ApiErrorCode::BackendUnavailable, e.to_string()))?;
+    backend.can_satisfy(&ir).await?;
 
     let row = store::insert_sandbox(
         &state.db,
         store::NewSandbox {
             id: &ir.id,
             lease_token: &lease_token,
-            backend,
+            backend: &backend_id,
             spec_json: &spec_json,
             ir: &ir,
             ttl_seconds: ir.ttl_seconds,
@@ -83,14 +164,17 @@ pub async fn create_sandbox(
     // Create the actual backend resource. On failure, mark the DB row as
     // error and surface the adapter error. We don't delete the row: the
     // audit trail is more useful than a clean table.
-    match state.adapter.create(&ir).await {
-        Ok(_) => {
-            store::set_status(&state.db, &ir.id, SandboxStatus::Running).await?;
-            audit::record(&state.db, &ir.id, Event::Created, Some(backend)).await;
+    match backend.create(&ir).await {
+        Ok(handle) => {
+            if let Err(error) =
+                persist_created_sandbox(&state, &backend, &backend_id, &ir.id, &handle).await
+            {
+                return Err(error);
+            }
         }
         Err(e) => {
             let msg = e.to_string();
-            store::set_status(&state.db, &ir.id, SandboxStatus::Error(msg.clone())).await?;
+            store::set_status(&state.db, &ir.id, SandboxState::Failed(msg.clone())).await?;
             audit::record(&state.db, &ir.id, Event::Error, Some(&msg)).await;
             return Err(e.into());
         }
@@ -103,9 +187,73 @@ pub async fn create_sandbox(
             lease_token: row.lease_token,
             status: "running".into(),
             expires_at: row.expires_at.to_rfc3339(),
-            backend: backend.to_string(),
+            backend: backend_id,
         }),
     ))
+}
+
+async fn persist_created_sandbox(
+    state: &SharedState,
+    backend: &std::sync::Arc<dyn agentsandbox_sdk::backend::SandboxBackend>,
+    backend_id: &str,
+    sandbox_id: &str,
+    handle: &str,
+) -> Result<(), ApiError> {
+    if let Err(error) = store::set_backend_handle(&state.db, sandbox_id, handle).await {
+        cleanup_after_persist_failure(state, backend, backend_id, sandbox_id, handle, &error).await;
+        return Err(error);
+    }
+
+    if let Err(error) = store::set_status(&state.db, sandbox_id, SandboxState::Running).await {
+        cleanup_after_persist_failure(state, backend, backend_id, sandbox_id, handle, &error).await;
+        return Err(error);
+    }
+
+    audit::record(&state.db, sandbox_id, Event::Created, Some(backend_id)).await;
+    Ok(())
+}
+
+async fn cleanup_after_persist_failure(
+    state: &SharedState,
+    backend: &std::sync::Arc<dyn agentsandbox_sdk::backend::SandboxBackend>,
+    backend_id: &str,
+    sandbox_id: &str,
+    handle: &str,
+    error: &ApiError,
+) {
+    tracing::error!(
+        sandbox_id = %sandbox_id,
+        backend_id = %backend_id,
+        backend_handle = %handle,
+        persist_error = %error,
+        "persistenza sandbox fallita dopo create; cleanup backend in corso"
+    );
+
+    if let Err(destroy_error) = backend.destroy(handle).await {
+        tracing::error!(
+            sandbox_id = %sandbox_id,
+            backend_id = %backend_id,
+            backend_handle = %handle,
+            error = %destroy_error,
+            "cleanup backend fallito dopo persist error"
+        );
+    }
+
+    let message = error.to_string();
+    if let Err(status_error) = store::set_status(
+        &state.db,
+        sandbox_id,
+        SandboxState::Failed(format!("persist error dopo create: {message}")),
+    )
+    .await
+    {
+        tracing::error!(
+            sandbox_id = %sandbox_id,
+            error = %status_error,
+            "impossibile marcare la sandbox come failed dopo cleanup"
+        );
+    }
+    audit::record(&state.db, sandbox_id, Event::Error, Some(&message)).await;
 }
 
 // ---------- GET /v1/sandboxes/:id ----------
@@ -124,12 +272,13 @@ fn is_backend_observed_status(status: &str) -> bool {
     matches!(status, "creating" | "running")
 }
 
-fn status_from_adapter(status: SandboxStatus) -> String {
+fn status_from_backend(status: SandboxState) -> String {
     match status {
-        SandboxStatus::Creating => "creating".into(),
-        SandboxStatus::Running => "running".into(),
-        SandboxStatus::Stopped => "stopped".into(),
-        SandboxStatus::Error(message) => {
+        SandboxState::Creating => "creating".into(),
+        SandboxState::Running => "running".into(),
+        SandboxState::Stopped => "stopped".into(),
+        SandboxState::Expired => "expired".into(),
+        SandboxState::Failed(message) => {
             tracing::warn!(error = %message, "backend reported error state");
             "error".into()
         }
@@ -144,18 +293,24 @@ async fn refresh_runtime_status(
         return Ok(row);
     }
 
-    match state.adapter.inspect(&row.id).await {
+    let backend = state
+        .registry
+        .get(&row.backend)
+        .map_err(|e| ApiError::new(crate::error::ApiErrorCode::BackendUnavailable, e.to_string()))?;
+
+    match backend.status(row.runtime_handle()).await {
         Ok(info) => {
-            let observed_status = status_from_adapter(info.status);
+            let observed_status = status_from_backend(info.state);
             if observed_status != row.status {
                 store::set_status(
                     &state.db,
                     &row.id,
                     match observed_status.as_str() {
-                        "creating" => SandboxStatus::Creating,
-                        "running" => SandboxStatus::Running,
-                        "stopped" => SandboxStatus::Stopped,
-                        _ => SandboxStatus::Error("backend reported failure".into()),
+                        "creating" => SandboxState::Creating,
+                        "running" => SandboxState::Running,
+                        "stopped" => SandboxState::Stopped,
+                        "expired" => SandboxState::Expired,
+                        _ => SandboxState::Failed("backend reported failure".into()),
                     },
                 )
                 .await?;
@@ -165,8 +320,8 @@ async fn refresh_runtime_status(
                 ..row
             })
         }
-        Err(AdapterError::NotFound(_)) => {
-            store::set_status(&state.db, &row.id, SandboxStatus::Stopped).await?;
+        Err(BackendError::NotFound(_)) => {
+            store::set_status(&state.db, &row.id, SandboxState::Stopped).await?;
             Ok(SandboxRow {
                 status: "stopped".into(),
                 ..row
@@ -290,7 +445,11 @@ pub async fn exec_sandbox(
         ));
     }
 
-    let result = state.adapter.exec(&id, &req.command).await?;
+    let backend = state
+        .registry
+        .get(&row.backend)
+        .map_err(|e| ApiError::new(crate::error::ApiErrorCode::BackendUnavailable, e.to_string()))?;
+    let result = backend.exec(row.runtime_handle(), &req.command, None).await?;
     audit::record(
         &state.db,
         &id,
@@ -324,7 +483,13 @@ pub async fn destroy_sandbox(
         require_lease(&state, &id, &headers).await?;
     }
 
-    state.adapter.destroy(&id).await?;
+    if let Some(row) = store::get_sandbox(&state.db, &id).await? {
+        let backend = state
+            .registry
+            .get(&row.backend)
+            .map_err(|e| ApiError::new(crate::error::ApiErrorCode::BackendUnavailable, e.to_string()))?;
+        backend.destroy(row.runtime_handle()).await?;
+    }
     store::delete_sandbox(&state.db, &id).await?;
     audit::record(&state.db, &id, Event::Destroyed, None).await;
 
@@ -335,62 +500,106 @@ pub async fn destroy_sandbox(
 mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
-    use std::sync::Arc;
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
 
-    use agentsandbox_core::{ExecResult, SandboxAdapter, SandboxInfo};
     use async_trait::async_trait;
+    use agentsandbox_sdk::{
+        backend::{
+            BackendCapabilities, BackendDescriptor, BackendFactory, ExecResult, IsolationLevel,
+            SandboxBackend, SandboxState, SandboxStatus,
+        },
+        error::BackendError,
+        ir::SandboxIR,
+    };
     use chrono::{Duration, Utc};
     use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
     use std::str::FromStr;
     use tower::ServiceExt;
 
-    use crate::{router, state::AppState};
+    use crate::{registry::BackendRegistry, router, state::AppState};
 
     enum InspectBehavior {
-        Status(SandboxStatus),
+        Status(SandboxState),
         NotFound,
     }
 
-    struct MockAdapter {
+    struct MockBackend {
         inspect_behavior: InspectBehavior,
+        destroyed: Arc<Mutex<Vec<String>>>,
     }
 
     #[async_trait]
-    impl SandboxAdapter for MockAdapter {
-        async fn create(&self, ir: &agentsandbox_core::SandboxIR) -> Result<String, AdapterError> {
-            Ok(ir.id.clone())
+    impl SandboxBackend for MockBackend {
+        async fn create(&self, ir: &SandboxIR) -> Result<String, BackendError> {
+            Ok(format!("handle-{}", ir.id))
         }
 
         async fn exec(
             &self,
-            _sandbox_id: &str,
+            _handle: &str,
             _command: &str,
-        ) -> Result<ExecResult, AdapterError> {
-            Err(AdapterError::Internal("unused".into()))
+            _timeout_ms: Option<u64>,
+        ) -> Result<ExecResult, BackendError> {
+            Err(BackendError::Internal("unused".into()))
         }
 
-        async fn inspect(&self, _sandbox_id: &str) -> Result<SandboxInfo, AdapterError> {
+        async fn status(&self, handle: &str) -> Result<SandboxStatus, BackendError> {
             match &self.inspect_behavior {
-                InspectBehavior::Status(status) => Ok(SandboxInfo {
-                    sandbox_id: "test".into(),
-                    status: status.clone(),
+                InspectBehavior::Status(status) => Ok(SandboxStatus {
+                    sandbox_id: handle.into(),
+                    state: status.clone(),
                     created_at: Utc::now(),
                     expires_at: Utc::now(),
+                    backend_id: "mock".into(),
                 }),
-                InspectBehavior::NotFound => Err(AdapterError::NotFound("missing".into())),
+                InspectBehavior::NotFound => Err(BackendError::NotFound("missing".into())),
             }
         }
 
-        async fn destroy(&self, _sandbox_id: &str) -> Result<(), AdapterError> {
+        async fn destroy(&self, handle: &str) -> Result<(), BackendError> {
+            self.destroyed.lock().unwrap().push(handle.to_string());
             Ok(())
         }
 
-        fn backend_name(&self) -> &'static str {
-            "mock"
+        async fn health_check(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
+    struct MockFactory {
+        inspect_behavior: InspectBehavior,
+        destroyed: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl BackendFactory for MockFactory {
+        fn describe(&self) -> BackendDescriptor {
+            BackendDescriptor {
+                id: "mock",
+                display_name: "Mock",
+                version: "test",
+                trait_version: agentsandbox_sdk::BACKEND_TRAIT_VERSION,
+                capabilities: BackendCapabilities {
+                    isolation_level: IsolationLevel::Process,
+                    ..BackendCapabilities::default()
+                },
+                extensions_schema: None,
+            }
         }
 
-        async fn health_check(&self) -> Result<(), AdapterError> {
-            Ok(())
+        fn create(
+            &self,
+            _config: &HashMap<String, String>,
+        ) -> Result<Box<dyn SandboxBackend>, BackendError> {
+            Ok(Box::new(MockBackend {
+                inspect_behavior: match &self.inspect_behavior {
+                    InspectBehavior::Status(state) => InspectBehavior::Status(state.clone()),
+                    InspectBehavior::NotFound => InspectBehavior::NotFound,
+                },
+                destroyed: self.destroyed.clone(),
+            }))
         }
     }
 
@@ -403,16 +612,38 @@ mod tests {
         pool
     }
 
+    async fn test_state(
+        db: SqlitePool,
+        inspect_behavior: InspectBehavior,
+    ) -> (Arc<AppState>, Arc<Mutex<Vec<String>>>) {
+        let mut registry = BackendRegistry::new();
+        let destroyed = Arc::new(Mutex::new(Vec::new()));
+        let factory = MockFactory {
+            inspect_behavior,
+            destroyed: destroyed.clone(),
+        };
+        registry.register(&factory);
+        registry.initialize(&factory, &HashMap::new()).await;
+        (
+            Arc::new(AppState {
+                db,
+                registry: Arc::new(registry),
+            }),
+            destroyed,
+        )
+    }
+
     async fn insert_running_row(pool: &SqlitePool, id: &str) {
         let created_at = Utc::now();
         let expires_at = created_at + Duration::seconds(60);
         sqlx::query(
             "INSERT INTO sandboxes \
-             (id, lease_token, status, backend, spec_json, ir_json, created_at, expires_at) \
-             VALUES (?1, ?2, 'running', 'mock', '{}', '{}', ?3, ?4)",
+             (id, lease_token, status, backend, backend_handle, spec_json, ir_json, created_at, expires_at) \
+             VALUES (?1, ?2, 'running', 'mock', ?3, '{}', '{}', ?4, ?5)",
         )
         .bind(id)
         .bind("lease")
+        .bind(format!("handle-{id}"))
         .bind(created_at.to_rfc3339())
         .bind(expires_at.to_rfc3339())
         .execute(pool)
@@ -425,12 +656,8 @@ mod tests {
         let db = test_db().await;
         insert_running_row(&db, "sb-1").await;
         let row = store::get_sandbox(&db, "sb-1").await.unwrap().unwrap();
-        let state = Arc::new(AppState {
-            db: db.clone(),
-            adapter: Arc::new(MockAdapter {
-                inspect_behavior: InspectBehavior::Status(SandboxStatus::Stopped),
-            }),
-        });
+        let (state, _) =
+            test_state(db.clone(), InspectBehavior::Status(SandboxState::Stopped)).await;
 
         let fresh = refresh_runtime_status(&state, row).await.unwrap();
         assert_eq!(fresh.status, "stopped");
@@ -444,12 +671,7 @@ mod tests {
         let db = test_db().await;
         insert_running_row(&db, "sb-2").await;
         let row = store::get_sandbox(&db, "sb-2").await.unwrap().unwrap();
-        let state = Arc::new(AppState {
-            db: db.clone(),
-            adapter: Arc::new(MockAdapter {
-                inspect_behavior: InspectBehavior::NotFound,
-            }),
-        });
+        let (state, _) = test_state(db.clone(), InspectBehavior::NotFound).await;
 
         let fresh = refresh_runtime_status(&state, row).await.unwrap();
         assert_eq!(fresh.status, "stopped");
@@ -461,12 +683,7 @@ mod tests {
     #[tokio::test]
     async fn create_sandbox_accepts_v1_json() {
         let db = test_db().await;
-        let state = Arc::new(AppState {
-            db,
-            adapter: Arc::new(MockAdapter {
-                inspect_behavior: InspectBehavior::Status(SandboxStatus::Running),
-            }),
-        });
+        let (state, _) = test_state(db, InspectBehavior::Status(SandboxState::Running)).await;
         let app = router::build(state);
 
         let response = app
@@ -489,12 +706,7 @@ mod tests {
     #[tokio::test]
     async fn create_sandbox_accepts_v1_yaml() {
         let db = test_db().await;
-        let state = Arc::new(AppState {
-            db,
-            adapter: Arc::new(MockAdapter {
-                inspect_behavior: InspectBehavior::Status(SandboxStatus::Running),
-            }),
-        });
+        let (state, _) = test_state(db, InspectBehavior::Status(SandboxState::Running)).await;
         let app = router::build(state);
 
         let response = app
@@ -517,12 +729,7 @@ mod tests {
     #[tokio::test]
     async fn create_sandbox_returns_structured_schema_errors() {
         let db = test_db().await;
-        let state = Arc::new(AppState {
-            db,
-            adapter: Arc::new(MockAdapter {
-                inspect_behavior: InspectBehavior::Status(SandboxStatus::Running),
-            }),
-        });
+        let (state, _) = test_state(db, InspectBehavior::Status(SandboxState::Running)).await;
         let app = router::build(state);
 
         let response = app
@@ -559,5 +766,43 @@ mod tests {
         let details = &payload["error"]["details"]["validationErrors"];
         assert!(details.is_array());
         assert!(details.as_array().unwrap().len() >= 2);
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_cleans_up_backend_if_handle_persist_fails() {
+        let db = test_db().await;
+        sqlx::query(
+            "CREATE TRIGGER fail_backend_handle_update \
+             BEFORE UPDATE OF backend_handle ON sandboxes \
+             BEGIN \
+               SELECT RAISE(FAIL, 'backend_handle update blocked'); \
+             END;",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let (state, destroyed) = test_state(db.clone(), InspectBehavior::Status(SandboxState::Running)).await;
+        let app = router::build(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"apiVersion":"sandbox.ai/v1","kind":"Sandbox","metadata":{},"spec":{"runtime":{"preset":"python"}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+
+        let destroyed = destroyed.lock().unwrap().clone();
+        assert_eq!(destroyed.len(), 1);
+        assert!(destroyed[0].starts_with("handle-"));
     }
 }

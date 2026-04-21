@@ -1,9 +1,11 @@
 //! Spec -> IR compile pipeline.
 
 use crate::{
-    ir::SandboxIR,
     schema::validate_raw,
     spec::{NetworkSpec, ResourceSpec, RuntimePreset, SandboxSpec, SecretRef, API_VERSION_V1},
+};
+use agentsandbox_sdk::ir::{
+    AuditLevel, EgressIR, EgressMode, SandboxIR, SchedulingPriority,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -118,6 +120,7 @@ pub fn compile(spec: SandboxSpec) -> Result<SandboxIR, CompileError> {
             body.runtime.version.as_deref(),
         )?,
         runtime_version: body.runtime.version,
+        labels: spec.metadata.labels.unwrap_or_default(),
         ..SandboxIR::default()
     };
 
@@ -136,13 +139,13 @@ pub fn compile(spec: SandboxSpec) -> Result<SandboxIR, CompileError> {
     if let Some(scheduling) = body.scheduling {
         ir.backend_hint = scheduling.backend;
         ir.prefer_warm = scheduling.prefer_warm;
-        ir.priority = scheduling.priority;
+        ir.priority = scheduling.priority.map(map_priority);
     }
     if let Some(storage) = body.storage {
         ir.storage_volumes = storage.volumes;
     }
     if let Some(observability) = body.observability {
-        ir.audit_level = observability.audit_level;
+        ir.audit_level = observability.audit_level.map(map_audit_level);
         ir.metrics_enabled = observability.metrics_enabled.unwrap_or(false);
     }
 
@@ -160,7 +163,9 @@ fn apply_resources(ir: &mut SandboxIR, resources: Option<ResourceSpec>) {
         if let Some(v) = res.disk_mb {
             ir.disk_mb = v;
         }
-        ir.exec_timeout_ms = res.timeout_ms;
+        if let Some(v) = res.timeout_ms {
+            ir.timeout_ms = v;
+        }
     }
 }
 
@@ -169,9 +174,12 @@ fn apply_network(ir: &mut SandboxIR, network: Option<NetworkSpec>) -> Result<(),
         for host in &net.egress.allow {
             validate_hostname(host)?;
         }
-        ir.egress_allow = net.egress.allow;
-        ir.deny_by_default = net.egress.deny_by_default;
-        ir.egress_mode = net.egress.mode;
+        ir.egress = EgressIR {
+            mode: net.egress.mode.map(map_egress_mode).unwrap_or(EgressMode::Proxy),
+            allow_hostnames: net.egress.allow,
+            allow_ips: Vec::new(),
+            deny_by_default: net.egress.deny_by_default,
+        };
     }
     Ok(())
 }
@@ -216,6 +224,30 @@ fn resolve_image(
     }
 }
 
+fn map_egress_mode(mode: crate::spec::EgressMode) -> EgressMode {
+    match mode {
+        crate::spec::EgressMode::None => EgressMode::None,
+        crate::spec::EgressMode::Proxy => EgressMode::Proxy,
+        crate::spec::EgressMode::Passthrough => EgressMode::Passthrough,
+    }
+}
+
+fn map_priority(priority: crate::spec::SchedulingPriority) -> SchedulingPriority {
+    match priority {
+        crate::spec::SchedulingPriority::Low => SchedulingPriority::Low,
+        crate::spec::SchedulingPriority::Normal => SchedulingPriority::Normal,
+        crate::spec::SchedulingPriority::High => SchedulingPriority::High,
+    }
+}
+
+fn map_audit_level(level: crate::spec::AuditLevel) -> AuditLevel {
+    match level {
+        crate::spec::AuditLevel::None => AuditLevel::None,
+        crate::spec::AuditLevel::Basic => AuditLevel::Basic,
+        crate::spec::AuditLevel::Full => AuditLevel::Full,
+    }
+}
+
 fn resolve_secret(secret: &SecretRef) -> Result<String, CompileError> {
     match (&secret.value_from.env_ref, &secret.value_from.file) {
         (Some(name), None) => {
@@ -245,7 +277,6 @@ fn validate_hostname(host: &str) -> Result<(), CompileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::{AuditLevel, EgressMode, SchedulingPriority};
 
     fn parse(yaml: &str) -> SandboxSpec {
         serde_yaml::from_str(yaml).expect("YAML di test deve essere valido")
@@ -308,8 +339,8 @@ spec:
 "#;
         let ir = compile_any(raw).unwrap();
         assert_eq!(ir.image, "python:3.11-slim");
-        assert_eq!(ir.exec_timeout_ms, Some(45000));
-        assert_eq!(ir.egress_mode, Some(EgressMode::Proxy));
+        assert_eq!(ir.timeout_ms, 45000);
+        assert_eq!(ir.egress.mode, EgressMode::Proxy);
         assert_eq!(ir.backend_hint.as_deref(), Some("docker"));
         assert!(ir.prefer_warm);
         assert_eq!(ir.priority, Some(SchedulingPriority::High));
@@ -449,7 +480,7 @@ spec:
         assert_eq!(ir.cpu_millicores, 2000);
         assert_eq!(ir.memory_mb, 2048);
         assert_eq!(ir.disk_mb, 4096);
-        assert_eq!(ir.exec_timeout_ms, Some(1234));
+        assert_eq!(ir.timeout_ms, 1234);
     }
 
     #[test]
@@ -507,9 +538,9 @@ spec:
                \n  network:\n    egress:\n      allow: [\"pypi.org\", \"files.pythonhosted.org\"]\n      denyByDefault: true\n      mode: proxy\n",
         );
         let ir = compile(spec).unwrap();
-        assert_eq!(ir.egress_allow, vec!["pypi.org", "files.pythonhosted.org"]);
-        assert!(ir.deny_by_default);
-        assert_eq!(ir.egress_mode, Some(EgressMode::Proxy));
+        assert_eq!(ir.egress.allow_hostnames, vec!["pypi.org", "files.pythonhosted.org"]);
+        assert!(ir.egress.deny_by_default);
+        assert_eq!(ir.egress.mode, EgressMode::Proxy);
     }
 
     #[test]
@@ -522,7 +553,7 @@ spec:
                \n  network:\n    egress:\n      allow: [\"pypi.org\"]\n",
         );
         let ir = compile(spec).unwrap();
-        assert!(ir.deny_by_default);
+        assert!(ir.egress.deny_by_default);
     }
 
     #[test]

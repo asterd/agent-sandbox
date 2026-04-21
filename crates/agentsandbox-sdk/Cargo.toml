@@ -1,15 +1,15 @@
 [package]
-name = "agentsandbox-core"
+name = "agentsandbox-sdk"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Spec parser and compile pipeline for AgentSandbox"
+description = "Public backend SDK for AgentSandbox"
 
 [dependencies]
-agentsandbox-sdk = { path = "../agentsandbox-sdk" }
+async-trait = { workspace = true }
+chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml = { workspace = true }
-jsonschema = { workspace = true }
 thiserror = { workspace = true }
+uuid = { workspace = true }

@@ -5,8 +5,10 @@
 //! trade-off is no query-time checking; we compensate with tight types and
 //! unit-tested helpers.
 
-use agentsandbox_core::ir::SandboxIR;
-use agentsandbox_core::{AuditLevel, EgressMode, SandboxStatus, SchedulingPriority};
+use agentsandbox_sdk::{
+    backend::SandboxState,
+    ir::{AuditLevel, EgressMode, SandboxIR, SchedulingPriority},
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -27,11 +29,14 @@ pub struct StoredIr {
     pub memory_mb: u32,
     pub disk_mb: u32,
     pub egress_allow: Vec<String>,
+    pub allow_ips: Vec<String>,
     pub deny_by_default: bool,
-    pub egress_mode: Option<EgressMode>,
+    pub egress_mode: EgressMode,
     pub ttl_seconds: u64,
-    pub exec_timeout_ms: Option<u64>,
+    pub timeout_ms: u64,
     pub working_dir: String,
+    pub labels: std::collections::HashMap<String, String>,
+    pub extensions: Option<serde_json::Value>,
     pub runtime_version: Option<String>,
     pub backend_hint: Option<String>,
     pub prefer_warm: bool,
@@ -51,12 +56,15 @@ impl From<&SandboxIR> for StoredIr {
             cpu_millicores: ir.cpu_millicores,
             memory_mb: ir.memory_mb,
             disk_mb: ir.disk_mb,
-            egress_allow: ir.egress_allow.clone(),
-            deny_by_default: ir.deny_by_default,
-            egress_mode: ir.egress_mode,
+            egress_allow: ir.egress.allow_hostnames.clone(),
+            allow_ips: ir.egress.allow_ips.clone(),
+            deny_by_default: ir.egress.deny_by_default,
+            egress_mode: ir.egress.mode.clone(),
             ttl_seconds: ir.ttl_seconds,
-            exec_timeout_ms: ir.exec_timeout_ms,
+            timeout_ms: ir.timeout_ms,
             working_dir: ir.working_dir.clone(),
+            labels: ir.labels.clone(),
+            extensions: ir.extensions.clone(),
             runtime_version: ir.runtime_version.clone(),
             backend_hint: ir.backend_hint.clone(),
             prefer_warm: ir.prefer_warm,
@@ -75,18 +83,24 @@ pub struct SandboxRow {
     pub lease_token: String,
     pub status: String,
     pub backend: String,
+    pub backend_handle: Option<String>,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub error_message: Option<String>,
 }
 
 impl SandboxRow {
+    pub fn runtime_handle(&self) -> &str {
+        self.backend_handle.as_deref().unwrap_or(&self.id)
+    }
+
     fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
             id: row.try_get("id")?,
             lease_token: row.try_get("lease_token")?,
             status: row.try_get("status")?,
             backend: row.try_get("backend")?,
+            backend_handle: row.try_get("backend_handle")?,
             created_at: parse_ts(row.try_get::<String, _>("created_at")?)?,
             expires_at: parse_ts(row.try_get::<String, _>("expires_at")?)?,
             error_message: row.try_get("error_message")?,
@@ -120,8 +134,8 @@ pub async fn insert_sandbox(
 
     sqlx::query(
         "INSERT INTO sandboxes \
-         (id, lease_token, status, backend, spec_json, ir_json, created_at, expires_at) \
-         VALUES (?1, ?2, 'creating', ?3, ?4, ?5, ?6, ?7)",
+         (id, lease_token, status, backend, backend_handle, spec_json, ir_json, created_at, expires_at) \
+         VALUES (?1, ?2, 'creating', ?3, NULL, ?4, ?5, ?6, ?7)",
     )
     .bind(new.id)
     .bind(new.lease_token)
@@ -138,19 +152,33 @@ pub async fn insert_sandbox(
         lease_token: new.lease_token.to_string(),
         status: "creating".into(),
         backend: new.backend.to_string(),
+        backend_handle: None,
         created_at,
         expires_at,
         error_message: None,
     })
 }
 
+pub async fn set_backend_handle(
+    pool: &SqlitePool,
+    id: &str,
+    backend_handle: &str,
+) -> Result<(), ApiError> {
+    sqlx::query("UPDATE sandboxes SET backend_handle = ?1 WHERE id = ?2")
+        .bind(backend_handle)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn set_status(
     pool: &SqlitePool,
     id: &str,
-    status: SandboxStatus,
+    status: SandboxState,
 ) -> Result<(), ApiError> {
     let (status_str, err) = match status {
-        SandboxStatus::Error(msg) => ("error".to_string(), Some(msg)),
+        SandboxState::Failed(msg) => ("error".to_string(), Some(msg)),
         other => (other.as_str().to_string(), None),
     };
     sqlx::query("UPDATE sandboxes SET status = ?1, error_message = ?2 WHERE id = ?3")

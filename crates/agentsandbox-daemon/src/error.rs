@@ -10,8 +10,8 @@
 //! Internal details (sqlx errors, raw bollard strings) are logged but never
 //! surfaced verbatim — we map them to stable codes.
 
-use agentsandbox_core::adapter::AdapterError;
 use agentsandbox_core::compile::CompileError;
+use agentsandbox_sdk::error::BackendError;
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -108,15 +108,17 @@ impl ApiError {
     }
 }
 
-impl From<AdapterError> for ApiError {
-    fn from(e: AdapterError) -> Self {
+impl From<BackendError> for ApiError {
+    fn from(e: BackendError) -> Self {
         let code = match e {
-            AdapterError::NotFound(_) => ApiErrorCode::SandboxNotFound,
-            AdapterError::BackendUnavailable(_) => ApiErrorCode::BackendUnavailable,
-            AdapterError::Timeout(_) => ApiErrorCode::ExecTimeout,
-            AdapterError::ExecFailed { .. } | AdapterError::Internal(_) => {
-                ApiErrorCode::InternalError
+            BackendError::NotFound(_) => ApiErrorCode::SandboxNotFound,
+            BackendError::Unavailable(_) => ApiErrorCode::BackendUnavailable,
+            BackendError::Timeout(_) => ApiErrorCode::ExecTimeout,
+            BackendError::NotSupported(_) | BackendError::Configuration(_) => {
+                ApiErrorCode::SpecInvalid
             }
+            BackendError::ResourceExhausted(_) => ApiErrorCode::BackendUnavailable,
+            BackendError::Internal(_) => ApiErrorCode::InternalError,
         };
         ApiError::new(code, e.to_string())
     }

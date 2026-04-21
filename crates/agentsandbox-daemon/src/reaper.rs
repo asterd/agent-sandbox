@@ -32,10 +32,23 @@ pub async fn sweep(state: &SharedState) -> Result<usize, crate::error::ApiError>
     let count = expired.len();
     for id in expired {
         tracing::info!(sandbox_id = %id, "reaping expired sandbox");
-        if let Err(e) = state.adapter.destroy(&id).await {
-            tracing::warn!(sandbox_id = %id, error = %e, "destroy during reap failed");
+        if let Some(row) = store::get_sandbox(&state.db, &id).await? {
+            match state.registry.get(&row.backend) {
+                Ok(backend) => {
+                    if let Err(error) = backend.destroy(row.runtime_handle()).await {
+                        tracing::warn!(
+                            sandbox_id = %id,
+                            error = %error,
+                            "destroy during reap failed"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(sandbox_id = %id, error = %error, "backend missing during reap");
+                }
+            }
         }
-        store::set_status(&state.db, &id, agentsandbox_core::SandboxStatus::Stopped).await?;
+        store::set_status(&state.db, &id, agentsandbox_sdk::backend::SandboxState::Stopped).await?;
         audit::record(&state.db, &id, Event::Expired, None).await;
     }
     Ok(count)
@@ -44,56 +57,123 @@ pub async fn sweep(state: &SharedState) -> Result<usize, crate::error::ApiError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::{collections::HashMap, sync::{Arc, Mutex}};
 
-    use agentsandbox_core::{AdapterError, ExecResult, SandboxAdapter, SandboxInfo, SandboxStatus};
     use async_trait::async_trait;
+    use agentsandbox_sdk::{
+        backend::{
+            BackendCapabilities, BackendDescriptor, BackendFactory, ExecResult, IsolationLevel,
+            SandboxBackend,
+        },
+        error::BackendError,
+        ir::SandboxIR,
+    };
     use chrono::{Duration, Utc};
     use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
     use std::str::FromStr;
 
-    use crate::state::AppState;
-    use crate::store;
+    use crate::{registry::BackendRegistry, state::AppState, store};
 
     #[derive(Default)]
-    struct MockAdapter {
+    struct MockBackend {
         destroyed: Mutex<Vec<String>>,
     }
 
     #[async_trait]
-    impl SandboxAdapter for MockAdapter {
-        async fn create(&self, _ir: &agentsandbox_core::SandboxIR) -> Result<String, AdapterError> {
-            Err(AdapterError::Internal("unused".into()))
+    impl SandboxBackend for MockBackend {
+        async fn create(&self, _ir: &SandboxIR) -> Result<String, BackendError> {
+            Err(BackendError::Internal("unused".into()))
         }
 
         async fn exec(
             &self,
-            _sandbox_id: &str,
+            _handle: &str,
             _command: &str,
-        ) -> Result<ExecResult, AdapterError> {
-            Err(AdapterError::Internal("unused".into()))
+            _timeout_ms: Option<u64>,
+        ) -> Result<ExecResult, BackendError> {
+            Err(BackendError::Internal("unused".into()))
         }
 
-        async fn inspect(&self, sandbox_id: &str) -> Result<SandboxInfo, AdapterError> {
-            Ok(SandboxInfo {
-                sandbox_id: sandbox_id.into(),
-                status: SandboxStatus::Running,
+        async fn status(
+            &self,
+            handle: &str,
+        ) -> Result<agentsandbox_sdk::backend::SandboxStatus, BackendError> {
+            Ok(agentsandbox_sdk::backend::SandboxStatus {
+                sandbox_id: handle.into(),
+                state: agentsandbox_sdk::backend::SandboxState::Running,
                 created_at: Utc::now(),
                 expires_at: Utc::now(),
+                backend_id: "mock".into(),
             })
         }
 
-        async fn destroy(&self, sandbox_id: &str) -> Result<(), AdapterError> {
-            self.destroyed.lock().unwrap().push(sandbox_id.into());
+        async fn destroy(&self, handle: &str) -> Result<(), BackendError> {
+            self.destroyed.lock().unwrap().push(handle.into());
             Ok(())
         }
 
-        fn backend_name(&self) -> &'static str {
-            "mock"
+        async fn health_check(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
+    struct MockFactory {
+        backend: Arc<MockBackend>,
+    }
+
+    impl BackendFactory for MockFactory {
+        fn describe(&self) -> BackendDescriptor {
+            BackendDescriptor {
+                id: "mock",
+                display_name: "Mock",
+                version: "test",
+                trait_version: agentsandbox_sdk::BACKEND_TRAIT_VERSION,
+                capabilities: BackendCapabilities {
+                    isolation_level: IsolationLevel::Process,
+                    ..BackendCapabilities::default()
+                },
+                extensions_schema: None,
+            }
         }
 
-        async fn health_check(&self) -> Result<(), AdapterError> {
-            Ok(())
+        fn create(
+            &self,
+            _config: &HashMap<String, String>,
+        ) -> Result<Box<dyn SandboxBackend>, BackendError> {
+            Ok(Box::new(SharedMockBackend(self.backend.clone())))
+        }
+    }
+
+    struct SharedMockBackend(Arc<MockBackend>);
+
+    #[async_trait]
+    impl SandboxBackend for SharedMockBackend {
+        async fn create(&self, ir: &SandboxIR) -> Result<String, BackendError> {
+            self.0.create(ir).await
+        }
+
+        async fn exec(
+            &self,
+            handle: &str,
+            command: &str,
+            timeout_ms: Option<u64>,
+        ) -> Result<ExecResult, BackendError> {
+            self.0.exec(handle, command, timeout_ms).await
+        }
+
+        async fn status(
+            &self,
+            handle: &str,
+        ) -> Result<agentsandbox_sdk::backend::SandboxStatus, BackendError> {
+            self.0.status(handle).await
+        }
+
+        async fn destroy(&self, handle: &str) -> Result<(), BackendError> {
+            self.0.destroy(handle).await
+        }
+
+        async fn health_check(&self) -> Result<(), BackendError> {
+            self.0.health_check().await
         }
     }
 
@@ -110,11 +190,12 @@ mod tests {
         let created_at = expires_at - Duration::seconds(60);
         sqlx::query(
             "INSERT INTO sandboxes \
-             (id, lease_token, status, backend, spec_json, ir_json, created_at, expires_at) \
-             VALUES (?1, ?2, 'running', 'mock', '{}', '{}', ?3, ?4)",
+             (id, lease_token, status, backend, backend_handle, spec_json, ir_json, created_at, expires_at) \
+             VALUES (?1, ?2, 'running', 'mock', ?3, '{}', '{}', ?4, ?5)",
         )
         .bind(id)
         .bind(format!("lease-{id}"))
+        .bind(format!("handle-{id}"))
         .bind(created_at.to_rfc3339())
         .bind(expires_at.to_rfc3339())
         .execute(pool)
@@ -128,17 +209,23 @@ mod tests {
         insert_sandbox(&db, "expired-1", Utc::now() - Duration::seconds(1)).await;
         insert_sandbox(&db, "future-1", Utc::now() + Duration::seconds(600)).await;
 
-        let adapter = Arc::new(MockAdapter::default());
+        let backend = Arc::new(MockBackend::default());
+        let mut registry = BackendRegistry::new();
+        let factory = MockFactory {
+            backend: backend.clone(),
+        };
+        registry.register(&factory);
+        registry.initialize(&factory, &HashMap::new()).await;
         let state = Arc::new(AppState {
             db: db.clone(),
-            adapter: adapter.clone(),
+            registry: Arc::new(registry),
         });
 
         let count = sweep(&state).await.unwrap();
         assert_eq!(count, 1);
 
-        let destroyed = adapter.destroyed.lock().unwrap().clone();
-        assert_eq!(destroyed, vec!["expired-1".to_string()]);
+        let destroyed = backend.destroyed.lock().unwrap().clone();
+        assert_eq!(destroyed, vec!["handle-expired-1".to_string()]);
 
         let expired = store::get_sandbox(&db, "expired-1").await.unwrap().unwrap();
         assert_eq!(expired.status, "stopped");

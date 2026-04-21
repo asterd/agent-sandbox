@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Docker Backend Extensions",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "docker": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hostConfig": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "capAdd": { "type": "array", "items": { "type": "string" } },
+            "capDrop": { "type": "array", "items": { "type": "string" } },
+            "securityOpt": { "type": "array", "items": { "type": "string" } },
+            "privileged": { "type": "boolean" },
+            "shmSizeMb": { "type": "integer", "minimum": 1 },
+            "sysctls": { "type": "object", "additionalProperties": { "type": "string" } },
+            "binds": { "type": "array", "items": { "type": "string" } },
+            "ulimits": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "soft", "hard"],
+                "additionalProperties": false,
+                "properties": {
+                  "name": { "type": "string" },
+                  "soft": { "type": "integer" },
+                  "hard": { "type": "integer" }
+                }
+              }
+            },
+            "devices": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["pathOnHost", "pathInContainer", "cgroupPermissions"],
+                "additionalProperties": false,
+                "properties": {
+                  "pathOnHost": { "type": "string" },
+                  "pathInContainer": { "type": "string" },
+                  "cgroupPermissions": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

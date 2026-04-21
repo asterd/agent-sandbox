@@ -46,6 +46,21 @@ impl DaemonConfig {
     }
 }
 
+impl BackendsSection {
+    pub fn config_for(&self, backend_id: &str) -> std::collections::HashMap<String, String> {
+        match backend_id {
+            "docker" => {
+                let mut config = std::collections::HashMap::new();
+                if let Some(socket) = &self.docker.socket {
+                    config.insert("socket".into(), socket.clone());
+                }
+                config
+            }
+            _ => std::collections::HashMap::new(),
+        }
+    }
+}
+
 pub fn load_config(path: &str) -> anyhow::Result<DaemonConfig> {
     let mut builder = config::Config::builder()
         .set_default("daemon.host", "127.0.0.1")?

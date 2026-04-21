@@ -1,8 +1,10 @@
 [workspace]
 members = [
+    "crates/agentsandbox-sdk",
+    "crates/agentsandbox-conformance",
     "crates/agentsandbox-core",
     "crates/agentsandbox-daemon",
-    "crates/agentsandbox-docker",
+    "crates/agentsandbox-backend-docker",
 ]
 resolver = "2"
 
