@@ -3,25 +3,20 @@
 use crate::{
     ir::SandboxIR,
     schema::validate_raw,
-    spec::{
-        NetworkSpec, NetworkSpecV1Beta1, ResourceSpec, ResourceSpecV1Beta1, RuntimePreset,
-        SandboxSpec, SecretRef, SpecV1Beta1, API_VERSION_V1ALPHA1, API_VERSION_V1BETA1,
-    },
+    spec::{NetworkSpec, ResourceSpec, RuntimePreset, SandboxSpec, SecretRef, API_VERSION_V1},
 };
 use serde_json::Value;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpecVersion {
-    V1Alpha1,
-    V1Beta1,
+    V1,
 }
 
 impl SpecVersion {
     pub fn as_str(&self) -> &'static str {
         match self {
-            SpecVersion::V1Alpha1 => API_VERSION_V1ALPHA1,
-            SpecVersion::V1Beta1 => API_VERSION_V1BETA1,
+            SpecVersion::V1 => API_VERSION_V1,
         }
     }
 }
@@ -56,7 +51,7 @@ impl<'a> From<jsonschema::ValidationError<'a>> for ValidationIssue {
 pub enum CompileError {
     #[error("apiVersion mancante")]
     MissingApiVersion,
-    #[error("apiVersion non supportata: {0}")]
+    #[error("apiVersion non supportata: {0}. L'unica versione valida e' '{API_VERSION_V1}'")]
     UnsupportedApiVersion(String),
     #[error("payload non valido: {0}")]
     ParseError(String),
@@ -81,17 +76,20 @@ pub enum CompileError {
 
 pub fn detect_version(raw: &Value) -> Result<SpecVersion, CompileError> {
     match raw.get("apiVersion").and_then(Value::as_str) {
-        Some(API_VERSION_V1ALPHA1) => Ok(SpecVersion::V1Alpha1),
-        Some(API_VERSION_V1BETA1) => Ok(SpecVersion::V1Beta1),
+        Some(API_VERSION_V1) => Ok(SpecVersion::V1),
         Some(v) => Err(CompileError::UnsupportedApiVersion(v.to_string())),
         None => Err(CompileError::MissingApiVersion),
     }
 }
 
 pub fn compile_any(raw: &str) -> Result<SandboxIR, CompileError> {
-    let value: Value = serde_json::from_str(raw)
-        .or_else(|_| serde_yaml::from_str::<Value>(raw))
-        .map_err(|e| CompileError::ParseError(e.to_string()))?;
+    let raw = raw.trim();
+    let value: Value = if raw.starts_with('{') {
+        serde_json::from_str(raw).map_err(|e| CompileError::ParseError(e.to_string()))?
+    } else {
+        serde_yaml::from_str(raw).map_err(|e| CompileError::ParseError(e.to_string()))?
+    };
+
     compile_value(value)
 }
 
@@ -99,59 +97,13 @@ pub fn compile_value(value: Value) -> Result<SandboxIR, CompileError> {
     let version = detect_version(&value)?;
     validate_raw(version, &value)?;
 
-    match version {
-        SpecVersion::V1Alpha1 => {
-            let spec: SandboxSpec = serde_json::from_value(value)
-                .map_err(|e| CompileError::ParseError(e.to_string()))?;
-            compile_v1alpha1(spec)
-        }
-        SpecVersion::V1Beta1 => {
-            let spec: SpecV1Beta1 = serde_json::from_value(value)
-                .map_err(|e| CompileError::ParseError(e.to_string()))?;
-            compile_v1beta1(spec)
-        }
-    }
+    let spec: SandboxSpec =
+        serde_json::from_value(value).map_err(|e| CompileError::ParseError(e.to_string()))?;
+    compile(spec)
 }
 
 pub fn compile(spec: SandboxSpec) -> Result<SandboxIR, CompileError> {
-    compile_v1alpha1(spec)
-}
-
-fn compile_v1alpha1(spec: SandboxSpec) -> Result<SandboxIR, CompileError> {
-    if spec.api_version != API_VERSION_V1ALPHA1 {
-        return Err(CompileError::UnsupportedApiVersion(spec.api_version));
-    }
-    if spec.kind != "Sandbox" {
-        return Err(CompileError::UnsupportedKind(spec.kind));
-    }
-
-    let body = spec.spec;
-    let mut ir = SandboxIR {
-        image: resolve_image(&body.runtime.image, body.runtime.preset, None)?,
-        ..SandboxIR::default()
-    };
-
-    if let Some(wd) = body.runtime.working_dir {
-        ir.working_dir = wd;
-    }
-
-    apply_resources(&mut ir, body.resources);
-    apply_network_alpha(&mut ir, body.network)?;
-    apply_secrets(&mut ir, body.secrets)?;
-    apply_runtime_env(&mut ir, body.runtime.env);
-
-    if let Some(ttl) = body.ttl_seconds {
-        ir.ttl_seconds = ttl;
-    }
-    if let Some(scheduling) = body.scheduling {
-        ir.prefer_warm = scheduling.prefer_warm;
-    }
-
-    Ok(ir)
-}
-
-fn compile_v1beta1(spec: SpecV1Beta1) -> Result<SandboxIR, CompileError> {
-    if spec.api_version != API_VERSION_V1BETA1 {
+    if spec.api_version != API_VERSION_V1 {
         return Err(CompileError::UnsupportedApiVersion(spec.api_version));
     }
     if spec.kind != "Sandbox" {
@@ -173,8 +125,8 @@ fn compile_v1beta1(spec: SpecV1Beta1) -> Result<SandboxIR, CompileError> {
         ir.working_dir = wd;
     }
 
-    apply_resources_v1beta1(&mut ir, body.resources);
-    apply_network_v1beta1(&mut ir, body.network)?;
+    apply_resources(&mut ir, body.resources);
+    apply_network(&mut ir, body.network)?;
     apply_secrets(&mut ir, body.secrets)?;
     apply_runtime_env(&mut ir, body.runtime.env);
 
@@ -208,42 +160,11 @@ fn apply_resources(ir: &mut SandboxIR, resources: Option<ResourceSpec>) {
         if let Some(v) = res.disk_mb {
             ir.disk_mb = v;
         }
-    }
-}
-
-fn apply_resources_v1beta1(ir: &mut SandboxIR, resources: Option<ResourceSpecV1Beta1>) {
-    if let Some(res) = resources {
-        if let Some(v) = res.cpu_millicores {
-            ir.cpu_millicores = v;
-        }
-        if let Some(v) = res.memory_mb {
-            ir.memory_mb = v;
-        }
-        if let Some(v) = res.disk_mb {
-            ir.disk_mb = v;
-        }
         ir.exec_timeout_ms = res.timeout_ms;
     }
 }
 
-fn apply_network_alpha(
-    ir: &mut SandboxIR,
-    network: Option<NetworkSpec>,
-) -> Result<(), CompileError> {
-    if let Some(net) = network {
-        for host in &net.egress.allow {
-            validate_hostname(host)?;
-        }
-        ir.egress_allow = net.egress.allow;
-        ir.deny_by_default = net.egress.deny_by_default;
-    }
-    Ok(())
-}
-
-fn apply_network_v1beta1(
-    ir: &mut SandboxIR,
-    network: Option<NetworkSpecV1Beta1>,
-) -> Result<(), CompileError> {
+fn apply_network(ir: &mut SandboxIR, network: Option<NetworkSpec>) -> Result<(), CompileError> {
     if let Some(net) = network {
         for host in &net.egress.allow {
             validate_hostname(host)?;
@@ -324,9 +245,7 @@ fn validate_hostname(host: &str) -> Result<(), CompileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::{
-        AuditLevel, EgressMode, SandboxSpec, SchedulingPriority, API_VERSION_V1BETA1,
-    };
+    use crate::spec::{AuditLevel, EgressMode, SchedulingPriority};
 
     fn parse(yaml: &str) -> SandboxSpec {
         serde_yaml::from_str(yaml).expect("YAML di test deve essere valido")
@@ -334,7 +253,7 @@ mod tests {
 
     fn minimal_spec(preset: &str) -> SandboxSpec {
         parse(&format!(
-            "apiVersion: sandbox.ai/v1alpha1\n\
+            "apiVersion: sandbox.ai/v1\n\
              kind: Sandbox\n\
              metadata:\n  name: test\n\
              spec:\n  runtime:\n    preset: {}\n",
@@ -343,17 +262,15 @@ mod tests {
     }
 
     #[test]
-    fn detects_both_supported_versions() {
-        let alpha = serde_json::json!({ "apiVersion": "sandbox.ai/v1alpha1" });
-        let beta = serde_json::json!({ "apiVersion": API_VERSION_V1BETA1 });
-        assert_eq!(detect_version(&alpha).unwrap(), SpecVersion::V1Alpha1);
-        assert_eq!(detect_version(&beta).unwrap(), SpecVersion::V1Beta1);
+    fn detects_supported_version() {
+        let raw = serde_json::json!({ "apiVersion": "sandbox.ai/v1" });
+        assert_eq!(detect_version(&raw).unwrap(), SpecVersion::V1);
     }
 
     #[test]
-    fn compile_any_accepts_v1alpha1_json() {
+    fn compile_any_accepts_v1_json() {
         let raw = r#"{
-          "apiVersion":"sandbox.ai/v1alpha1",
+          "apiVersion":"sandbox.ai/v1",
           "kind":"Sandbox",
           "metadata":{},
           "spec":{"runtime":{"preset":"python"}}
@@ -363,9 +280,9 @@ mod tests {
     }
 
     #[test]
-    fn compile_any_accepts_v1beta1_yaml() {
+    fn compile_any_accepts_v1_yaml() {
         let raw = r#"
-apiVersion: sandbox.ai/v1beta1
+apiVersion: sandbox.ai/v1
 kind: Sandbox
 metadata: {}
 spec:
@@ -403,7 +320,7 @@ spec:
     #[test]
     fn schema_validation_collects_field_errors() {
         let raw = serde_json::json!({
-            "apiVersion": "sandbox.ai/v1beta1",
+            "apiVersion": "sandbox.ai/v1",
             "kind": "Sandbox",
             "metadata": {},
             "spec": {
@@ -461,7 +378,7 @@ spec:
     #[test]
     fn test_explicit_image_overrides_preset() {
         let spec = parse(
-            "apiVersion: sandbox.ai/v1alpha1\n\
+            "apiVersion: sandbox.ai/v1\n\
              kind: Sandbox\n\
              metadata: {}\n\
              spec:\n  runtime:\n    preset: python\n    image: my-registry/foo:42\n",
@@ -473,7 +390,7 @@ spec:
     #[test]
     fn test_missing_runtime_is_error() {
         let spec = parse(
-            "apiVersion: sandbox.ai/v1alpha1\n\
+            "apiVersion: sandbox.ai/v1\n\
              kind: Sandbox\n\
              metadata: {}\n\
              spec:\n  runtime: {}\n",
@@ -510,7 +427,7 @@ spec:
     #[test]
     fn test_custom_ttl_is_applied() {
         let spec = parse(
-            "apiVersion: sandbox.ai/v1alpha1\n\
+            "apiVersion: sandbox.ai/v1\n\
              kind: Sandbox\n\
              metadata: {}\n\
              spec:\n  runtime:\n    preset: python\n  ttlSeconds: 900\n",
@@ -522,22 +439,23 @@ spec:
     #[test]
     fn test_resources_override_defaults() {
         let spec = parse(
-            "apiVersion: sandbox.ai/v1alpha1\n\
+            "apiVersion: sandbox.ai/v1\n\
              kind: Sandbox\n\
              metadata: {}\n\
              spec:\n  runtime:\n    preset: python\n\
-               \n  resources:\n    cpuMillicores: 2000\n    memoryMb: 2048\n    diskMb: 4096\n",
+               \n  resources:\n    cpuMillicores: 2000\n    memoryMb: 2048\n    diskMb: 4096\n    timeoutMs: 1234\n",
         );
         let ir = compile(spec).unwrap();
         assert_eq!(ir.cpu_millicores, 2000);
         assert_eq!(ir.memory_mb, 2048);
         assert_eq!(ir.disk_mb, 4096);
+        assert_eq!(ir.exec_timeout_ms, Some(1234));
     }
 
     #[test]
     fn test_ip_in_egress_is_error() {
         let spec = parse(
-            "apiVersion: sandbox.ai/v1alpha1\n\
+            "apiVersion: sandbox.ai/v1\n\
              kind: Sandbox\n\
              metadata: {}\n\
              spec:\n  runtime:\n    preset: python\n\
@@ -552,7 +470,7 @@ spec:
     #[test]
     fn test_wildcard_in_egress_is_error() {
         let spec = parse(
-            "apiVersion: sandbox.ai/v1alpha1\n\
+            "apiVersion: sandbox.ai/v1\n\
              kind: Sandbox\n\
              metadata: {}\n\
              spec:\n  runtime:\n    preset: python\n\
@@ -567,7 +485,7 @@ spec:
     #[test]
     fn test_path_in_egress_is_error() {
         let spec = parse(
-            "apiVersion: sandbox.ai/v1alpha1\n\
+            "apiVersion: sandbox.ai/v1\n\
              kind: Sandbox\n\
              metadata: {}\n\
              spec:\n  runtime:\n    preset: python\n\
@@ -582,21 +500,22 @@ spec:
     #[test]
     fn test_valid_egress_is_accepted() {
         let spec = parse(
-            "apiVersion: sandbox.ai/v1alpha1\n\
+            "apiVersion: sandbox.ai/v1\n\
              kind: Sandbox\n\
              metadata: {}\n\
              spec:\n  runtime:\n    preset: python\n\
-               \n  network:\n    egress:\n      allow: [\"pypi.org\", \"files.pythonhosted.org\"]\n      denyByDefault: true\n",
+               \n  network:\n    egress:\n      allow: [\"pypi.org\", \"files.pythonhosted.org\"]\n      denyByDefault: true\n      mode: proxy\n",
         );
         let ir = compile(spec).unwrap();
         assert_eq!(ir.egress_allow, vec!["pypi.org", "files.pythonhosted.org"]);
         assert!(ir.deny_by_default);
+        assert_eq!(ir.egress_mode, Some(EgressMode::Proxy));
     }
 
     #[test]
     fn test_egress_deny_by_default_defaults_true() {
         let spec = parse(
-            "apiVersion: sandbox.ai/v1alpha1\n\
+            "apiVersion: sandbox.ai/v1\n\
              kind: Sandbox\n\
              metadata: {}\n\
              spec:\n  runtime:\n    preset: python\n\
@@ -609,7 +528,7 @@ spec:
     #[test]
     fn test_env_is_propagated_sorted() {
         let spec = parse(
-            "apiVersion: sandbox.ai/v1alpha1\n\
+            "apiVersion: sandbox.ai/v1\n\
              kind: Sandbox\n\
              metadata: {}\n\
              spec:\n  runtime:\n    preset: python\n    env:\n      FOO: bar\n      BAZ: qux\n",
@@ -630,7 +549,7 @@ spec:
         std::env::set_var(var_name, "deadbeef");
 
         let spec = parse(&format!(
-            "apiVersion: sandbox.ai/v1alpha1\n\
+            "apiVersion: sandbox.ai/v1\n\
              kind: Sandbox\n\
              metadata: {{}}\n\
              spec:\n  runtime:\n    preset: python\n\
@@ -645,7 +564,7 @@ spec:
     #[test]
     fn test_secret_with_both_sources_is_error() {
         let spec = parse(
-            "apiVersion: sandbox.ai/v1alpha1\n\
+            "apiVersion: sandbox.ai/v1\n\
              kind: Sandbox\n\
              metadata: {}\n\
              spec:\n  runtime:\n    preset: python\n\
@@ -660,7 +579,7 @@ spec:
     #[test]
     fn test_secret_with_no_sources_is_error() {
         let spec = parse(
-            "apiVersion: sandbox.ai/v1alpha1\n\
+            "apiVersion: sandbox.ai/v1\n\
              kind: Sandbox\n\
              metadata: {}\n\
              spec:\n  runtime:\n    preset: python\n\
@@ -675,7 +594,7 @@ spec:
     #[test]
     fn test_secret_missing_is_error() {
         let spec = parse(
-            "apiVersion: sandbox.ai/v1alpha1\n\
+            "apiVersion: sandbox.ai/v1\n\
              kind: Sandbox\n\
              metadata: {}\n\
              spec:\n  runtime:\n    preset: python\n\
@@ -690,7 +609,7 @@ spec:
     #[test]
     fn test_working_dir_override_applied() {
         let spec = parse(
-            "apiVersion: sandbox.ai/v1alpha1\n\
+            "apiVersion: sandbox.ai/v1\n\
              kind: Sandbox\n\
              metadata: {}\n\
              spec:\n  runtime:\n    preset: python\n    workingDir: /sandbox\n",
@@ -702,7 +621,7 @@ spec:
     #[test]
     fn test_unknown_top_level_field_is_error() {
         let err = compile_any(
-            "apiVersion: sandbox.ai/v1alpha1\n\
+            "apiVersion: sandbox.ai/v1\n\
              kind: Sandbox\n\
              metadata: {}\n\
              unexpected: true\n\
@@ -715,7 +634,7 @@ spec:
     #[test]
     fn test_unknown_runtime_field_is_error() {
         let err = compile_any(
-            "apiVersion: sandbox.ai/v1alpha1\n\
+            "apiVersion: sandbox.ai/v1\n\
              kind: Sandbox\n\
              metadata: {}\n\
              spec:\n  runtime:\n    preset: python\n    bogus: true\n",

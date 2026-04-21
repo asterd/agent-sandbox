@@ -17,7 +17,7 @@ From the repository root:
 cargo run -p agentsandbox-daemon
 ```
 
-Default configuration:
+Default configuration comes from `agentsandbox.toml`:
 
 - address: `127.0.0.1:7847`
 - SQLite DB: `sqlite://agentsandbox.db`
@@ -25,7 +25,7 @@ Default configuration:
 Override them if needed:
 
 ```bash
-AGENTSANDBOX_ADDR=127.0.0.1:9000 AGENTSANDBOX_DB=sqlite://dev.db cargo run -p agentsandbox-daemon
+AS_DAEMON_PORT=9000 AS_DATABASE_URL=sqlite://dev.db cargo run -p agentsandbox-daemon
 ```
 
 ## 2. Verify the daemon
@@ -87,13 +87,13 @@ console.log(result.stdout.trim());
 
 ## 5. Understand the request model
 
-The daemon accepts a `sandbox.ai/v1alpha1` spec in JSON or YAML.
+The daemon accepts a `sandbox.ai/v1` spec in JSON or YAML.
 
 Minimal JSON example:
 
 ```json
 {
-  "apiVersion": "sandbox.ai/v1alpha1",
+  "apiVersion": "sandbox.ai/v1",
   "kind": "Sandbox",
   "metadata": {},
   "spec": {
@@ -106,7 +106,7 @@ Minimal JSON example:
 Useful references:
 
 - [docs/api-http-v1.md](api-http-v1.md)
-- [docs/spec-v1alpha1.md](spec-v1alpha1.md)
+- [docs/spec-v1.md](spec-v1.md)
 
 ## Operational notes
 

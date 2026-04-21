@@ -5,23 +5,15 @@ use jsonschema::JSONSchema;
 use serde_json::Value;
 use std::sync::OnceLock;
 
-static SCHEMA_V1ALPHA1: OnceLock<JSONSchema> = OnceLock::new();
-static SCHEMA_V1BETA1: OnceLock<JSONSchema> = OnceLock::new();
+static SCHEMA_V1: OnceLock<JSONSchema> = OnceLock::new();
 
-pub fn schema_v1alpha1() -> &'static JSONSchema {
-    SCHEMA_V1ALPHA1
-        .get_or_init(|| load_schema(include_str!("../../../spec/sandbox.v1alpha1.schema.json")))
-}
-
-pub fn schema_v1beta1() -> &'static JSONSchema {
-    SCHEMA_V1BETA1
-        .get_or_init(|| load_schema(include_str!("../../../spec/sandbox.v1beta1.schema.json")))
+pub fn schema_v1() -> &'static JSONSchema {
+    SCHEMA_V1.get_or_init(|| load_schema(include_str!("../../../spec/sandbox.v1.schema.json")))
 }
 
 pub fn validate_raw(version: SpecVersion, raw: &Value) -> Result<(), CompileError> {
     let schema = match version {
-        SpecVersion::V1Alpha1 => schema_v1alpha1(),
-        SpecVersion::V1Beta1 => schema_v1beta1(),
+        SpecVersion::V1 => schema_v1(),
     };
 
     match schema.validate(raw) {

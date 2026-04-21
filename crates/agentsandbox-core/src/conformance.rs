@@ -46,10 +46,7 @@ pub async fn test_exec_returns_stdout(adapter: &dyn SandboxAdapter) {
 pub async fn test_exec_captures_stderr(adapter: &dyn SandboxAdapter) {
     let ir = shell_ir();
     let id = adapter.create(&ir).await.unwrap();
-    let result = adapter
-        .exec(&id, "echo 'err' >&2; exit 1")
-        .await
-        .unwrap();
+    let result = adapter.exec(&id, "echo 'err' >&2; exit 1").await.unwrap();
     assert!(result.stderr.contains("err"), "stderr vuoto: {:?}", result);
     assert_eq!(result.exit_code, 1);
     adapter.destroy(&id).await.unwrap();

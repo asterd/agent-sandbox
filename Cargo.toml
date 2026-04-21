@@ -25,10 +25,11 @@ uuid = { version = "1", features = ["v4"] }
 thiserror = "1"
 anyhow = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
 futures = "0.3"
+config = { version = "0.14", features = ["toml", "yaml"] }
 
 [profile.release]
 lto = "thin"

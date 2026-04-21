@@ -130,7 +130,7 @@ impl SandboxAdapter for DockerAdapter {
             // una regressione di sicurezza — il payload nella sandbox potrebbe
             // riscrivere le regole comunque, ma e' un effetto collaterale da
             // tenere a mente se in futuro esporremo la sandbox a codice meno
-            // fidato. v1beta1 spostera' l'enforcement fuori dal container
+            // fidato. La roadmap spostera' l'enforcement fuori dal container
             // (proxy L4 dedicato) ed eliminera' questa capability.
             cap_add: Self::should_apply_egress_rules(ir).then(|| vec!["NET_ADMIN".to_string()]),
             ..Default::default()

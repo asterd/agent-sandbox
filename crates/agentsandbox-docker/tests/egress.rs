@@ -123,8 +123,7 @@ async fn exec(docker: &Docker, name: &str, cmd: &str) -> anyhow::Result<ExecOutc
     let mut stdout = String::new();
     let mut stderr = String::new();
 
-    if let StartExecResults::Attached { mut output, .. } =
-        docker.start_exec(&exec.id, None).await?
+    if let StartExecResults::Attached { mut output, .. } = docker.start_exec(&exec.id, None).await?
     {
         while let Some(chunk) = output.next().await {
             match chunk? {
@@ -261,21 +260,13 @@ async fn apply_egress_rules_refuses_empty_allowlist_after_dns_failure() {
 
     // `.invalid` e' un TLD riservato (RFC 6761): la risoluzione fallisce
     // deterministicamente su qualsiasi resolver conforme.
-    let result = apply_egress_rules(
-        &docker,
-        name,
-        &["host-che-non-esiste.invalid".into()],
-    )
-    .await;
+    let result = apply_egress_rules(&docker, name, &["host-che-non-esiste.invalid".into()]).await;
     assert!(
         result.is_err(),
         "apply_egress_rules doveva fallire per allowlist vuota post-DNS"
     );
     let msg = result.unwrap_err().to_string();
-    assert!(
-        msg.contains("nessun hostname"),
-        "errore inatteso: {msg}"
-    );
+    assert!(msg.contains("nessun hostname"), "errore inatteso: {msg}");
 
     remove_container(&docker, name).await;
 }

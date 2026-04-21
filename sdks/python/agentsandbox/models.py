@@ -47,7 +47,7 @@ class SandboxInfo:
 
 @dataclass(slots=True)
 class SandboxConfig:
-    """User-facing configuration, converted to a v1alpha1 spec on create.
+    """User-facing configuration, converted to a v1 spec on create.
 
     Fields map 1:1 to the YAML spec. ``secrets`` is a mapping
     ``{env_name_in_guest: host_env_var_name}``: the SDK never receives the
@@ -68,7 +68,7 @@ class SandboxConfig:
     working_dir: str | None = None
     prefer_warm: bool = False
 
-    API_VERSION: ClassVar[str] = "sandbox.ai/v1alpha1"
+    API_VERSION: ClassVar[str] = "sandbox.ai/v1"
     KIND: ClassVar[str] = "Sandbox"
 
     def to_spec(self) -> dict[str, Any]:

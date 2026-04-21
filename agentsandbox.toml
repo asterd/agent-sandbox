@@ -1,0 +1,17 @@
+[daemon]
+host = "127.0.0.1"
+port = 7847
+log_level = "info"
+log_format = "text"
+
+[database]
+url = "sqlite://agentsandbox.db"
+
+[auth]
+mode = "single_user"
+
+[backends]
+enabled = ["docker"]
+
+[backends.docker]
+socket = "/var/run/docker.sock"

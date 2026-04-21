@@ -23,7 +23,7 @@ def test_exec_result_success_false_on_nonzero():
 def test_to_spec_minimal_uses_preset_and_omits_network():
     spec = SandboxConfig(runtime="python").to_spec()
 
-    assert spec["apiVersion"] == "sandbox.ai/v1alpha1"
+    assert spec["apiVersion"] == "sandbox.ai/v1"
     assert spec["kind"] == "Sandbox"
     runtime = spec["spec"]["runtime"]
     assert runtime == {"preset": "python"}

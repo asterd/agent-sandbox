@@ -59,7 +59,7 @@ export type SandboxOptions = Partial<Omit<SandboxConfig, "runtime">> & {
   runtime: string;
 };
 
-export const API_VERSION = "sandbox.ai/v1alpha1";
+export const API_VERSION = "sandbox.ai/v1";
 export const KIND = "Sandbox";
 export const DEFAULT_DAEMON_URL = "http://127.0.0.1:7847";
 export const LEASE_HEADER = "X-Lease-Token";

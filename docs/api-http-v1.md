@@ -53,7 +53,7 @@ Response:
 
 ### `POST /v1/sandboxes`
 
-Create a sandbox from a `sandbox.ai/v1alpha1` or `sandbox.ai/v1beta1` spec.
+Create a sandbox from a `sandbox.ai/v1` spec.
 
 Minimal request:
 
@@ -61,7 +61,7 @@ Minimal request:
 curl -sS \
   -H 'Content-Type: application/json' \
   -d '{
-    "apiVersion": "sandbox.ai/v1alpha1",
+    "apiVersion": "sandbox.ai/v1",
     "kind": "Sandbox",
     "metadata": {},
     "spec": {
@@ -91,7 +91,7 @@ curl -sS \
   -H 'Content-Type: application/yaml' \
   --data-binary @- \
   http://127.0.0.1:7847/v1/sandboxes <<'EOF'
-apiVersion: sandbox.ai/v1alpha1
+apiVersion: sandbox.ai/v1
 kind: Sandbox
 metadata: {}
 spec:
@@ -101,13 +101,13 @@ spec:
 EOF
 ```
 
-Minimal `v1beta1` request:
+Extended `v1` request:
 
 ```bash
 curl -sS \
   -H 'Content-Type: application/json' \
   -d '{
-    "apiVersion": "sandbox.ai/v1beta1",
+    "apiVersion": "sandbox.ai/v1",
     "kind": "Sandbox",
     "metadata": {},
     "spec": {
@@ -259,9 +259,9 @@ curl -sS \
 {
   "error": {
     "code": "SPEC_INVALID",
-    "message": "spec sandbox.ai/v1beta1 non valida",
+    "message": "spec V1 non valida",
     "details": {
-      "apiVersion": "sandbox.ai/v1beta1",
+      "apiVersion": "sandbox.ai/v1",
       "validationErrors": [
         {
           "path": "/spec/resources/cpuMillicores",
@@ -379,4 +379,4 @@ Typical envelope:
 - The daemon stores the submitted spec as JSON for audit consistency, even if the client sent YAML.
 - Secret values never appear in API responses.
 - `exec` uses `/bin/sh -c <command>` in the Docker adapter.
-- For `network.egress` limitations, see [spec-v1alpha1.md](spec-v1alpha1.md).
+- For `network.egress` limitations, see [spec-v1.md](spec-v1.md).

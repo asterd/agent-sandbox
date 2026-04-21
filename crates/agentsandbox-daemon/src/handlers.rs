@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_sandbox_accepts_v1alpha1_json() {
+    async fn create_sandbox_accepts_v1_json() {
         let db = test_db().await;
         let state = Arc::new(AppState {
             db,
@@ -476,7 +476,35 @@ mod tests {
                     .uri("/v1/sandboxes")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        r#"{"apiVersion":"sandbox.ai/v1alpha1","kind":"Sandbox","metadata":{},"spec":{"runtime":{"preset":"python"}}}"#,
+                        r#"{"apiVersion":"sandbox.ai/v1","kind":"Sandbox","metadata":{},"spec":{"runtime":{"preset":"python"}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_accepts_v1_yaml() {
+        let db = test_db().await;
+        let state = Arc::new(AppState {
+            db,
+            adapter: Arc::new(MockAdapter {
+                inspect_behavior: InspectBehavior::Status(SandboxStatus::Running),
+            }),
+        });
+        let app = router::build(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes")
+                    .header(header::CONTENT_TYPE, "application/yaml")
+                    .body(Body::from(
+                        "apiVersion: sandbox.ai/v1\nkind: Sandbox\nmetadata: {}\nspec:\n  runtime:\n    preset: python\n",
                     ))
                     .unwrap(),
             )
@@ -505,7 +533,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         r#"{
-                            "apiVersion":"sandbox.ai/v1beta1",
+                            "apiVersion":"sandbox.ai/v1",
                             "kind":"Sandbox",
                             "metadata":{},
                             "spec":{

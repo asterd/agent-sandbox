@@ -22,9 +22,7 @@ pub use compile::{
 };
 pub use ir::SandboxIR;
 pub use spec::{
-    AuditLevel, EgressMode, EgressPolicy, EgressPolicyV1Beta1, Metadata, NetworkSpec,
-    NetworkSpecV1Beta1, ObservabilitySpec, ResourceSpec, ResourceSpecV1Beta1, RuntimePreset,
-    RuntimeSpec, RuntimeSpecV1Beta1, SandboxSpec, SandboxSpecBody, SandboxSpecBodyV1Beta1,
-    SchedulingPriority, SchedulingSpec, SchedulingSpecV1Beta1, SecretRef, SecretSource,
-    SpecV1Alpha1, SpecV1Beta1, StorageSpec, API_VERSION_V1ALPHA1, API_VERSION_V1BETA1,
+    AuditLevel, EgressMode, EgressPolicy, Metadata, NetworkSpec, ObservabilitySpec, ResourceSpec,
+    RuntimePreset, RuntimeSpec, SandboxSpec, SandboxSpecBody, SchedulingPriority, SchedulingSpec,
+    SecretRef, SecretSource, StorageSpec, API_VERSION_V1,
 };

@@ -6,6 +6,7 @@
 //! the process.
 
 pub mod audit;
+pub mod config;
 pub mod error;
 pub mod handlers;
 pub mod reaper;

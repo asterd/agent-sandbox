@@ -66,7 +66,11 @@ mod tests {
             Err(AdapterError::Internal("unused".into()))
         }
 
-        async fn exec(&self, _sandbox_id: &str, _command: &str) -> Result<ExecResult, AdapterError> {
+        async fn exec(
+            &self,
+            _sandbox_id: &str,
+            _command: &str,
+        ) -> Result<ExecResult, AdapterError> {
             Err(AdapterError::Internal("unused".into()))
         }
 

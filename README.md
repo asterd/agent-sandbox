@@ -15,7 +15,7 @@ Clients do not need to know whether the backend is Docker or something else. In 
 
 Implemented today:
 
-- public `sandbox.ai/v1alpha1` spec
+- public `sandbox.ai/v1` spec
 - `spec -> IR` compilation in `agentsandbox-core`
 - local HTTP daemon with Axum + SQLite persistence
 - Docker adapter for create / exec / inspect / destroy
@@ -25,7 +25,7 @@ Implemented today:
 Current limits that matter:
 
 - Docker is the only backend
-- `network.egress` in `v1alpha1` is hostname-based and resolved once at sandbox creation
+- `network.egress` in `v1` is hostname-based and resolved once at sandbox creation
 - egress enforcement relies on `iptables` inside the guest when an allowlist is configured
 - the planned stable replacement for filtered egress is the proxy L4 path in `ROADMAP_STABLE.md` FASE C
 - the SDKs are local workspace packages in this repository; registry publishing is not part of the current phase
@@ -64,20 +64,21 @@ From the repository root:
 cargo run -p agentsandbox-daemon
 ```
 
-By default the daemon:
+By default the daemon loads `agentsandbox.toml` from the repo root and:
 
 - listens on `http://127.0.0.1:7847`
 - stores state in `sqlite://agentsandbox.db`
 
 Useful environment variables:
 
-- `AGENTSANDBOX_ADDR`
-- `AGENTSANDBOX_DB`
+- `AS_CONFIG`
+- `AS_DAEMON_PORT`
+- `AS_DATABASE_URL`
 
 Example:
 
 ```bash
-AGENTSANDBOX_ADDR=127.0.0.1:9000 AGENTSANDBOX_DB=sqlite://dev.db cargo run -p agentsandbox-daemon
+AS_DAEMON_PORT=9000 AS_DATABASE_URL=sqlite://dev.db cargo run -p agentsandbox-daemon
 ```
 
 ### 2. Check health
@@ -142,12 +143,12 @@ console.log(result.stdout.trim());
 
 - [Getting started](docs/getting-started.md)
 - [HTTP API v1](docs/api-http-v1.md)
-- [Spec v1alpha1](docs/spec-v1alpha1.md)
+- [Spec v1](docs/spec-v1.md)
 - [Examples](examples/README.md)
 
 ## Known limits
 
-### `network.egress` in `v1alpha1`
+### `network.egress` in `v1`
 
 - DNS resolution happens once, at sandbox creation time
 - DNS rebinding is not prevented

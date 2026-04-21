@@ -1,6 +1,6 @@
 //! Egress allowlist enforcement for Docker sandboxes.
 //!
-//! v1alpha1 keeps the model intentionally simple:
+//! The current `v1` contract keeps the model intentionally simple:
 //! - resolve hostnames once at sandbox startup
 //! - translate the resolved IPs into container-local `iptables` rules
 //! - never update the rules afterwards
@@ -82,13 +82,13 @@ pub async fn apply_egress_rules(
     tracing::info!(
         container = %container_name,
         allowed_ips = ?resolved.allowed_ips,
-        "applicazione regole egress v1alpha1"
+        "applicazione regole egress v1"
     );
 
     // Se l'utente ha dichiarato una allowlist ma il DNS ha fallito per
     // tutti gli host, installare comunque `OUTPUT DROP` equivarrebbe a un
     // silent fallback a sandbox offline con `bridge + NET_ADMIN` — esattamente
-    // il "nessun fallback silenzioso" che la spec v1alpha1 vieta. Fail-closed.
+    // il "nessun fallback silenzioso" che la spec v1 vieta. Fail-closed.
     if resolved.is_empty() && !allow.is_empty() {
         bail!(
             "nessun hostname di network.egress.allow e' stato risolto; \
@@ -212,7 +212,10 @@ mod tests {
 
     #[test]
     fn resolved_egress_is_empty_reflects_allowed_ips() {
-        assert!(ResolvedEgress { allowed_ips: vec![] }.is_empty());
+        assert!(ResolvedEgress {
+            allowed_ips: vec![]
+        }
+        .is_empty());
         assert!(!ResolvedEgress {
             allowed_ips: vec!["1.1.1.1".into()],
         }
