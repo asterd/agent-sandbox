@@ -13,6 +13,7 @@ use agentsandbox_core::adapter::{
     AdapterError, ExecResult, SandboxAdapter, SandboxInfo, SandboxStatus,
 };
 use agentsandbox_core::ir::SandboxIR;
+use agentsandbox_core::EgressMode;
 use async_trait::async_trait;
 use bollard::container::{
     Config, CreateContainerOptions, InspectContainerOptions, LogOutput, RemoveContainerOptions,
@@ -64,6 +65,12 @@ impl DockerAdapter {
     ///   allowlist is non-empty, Fase 6 installs container-local iptables
     ///   rules immediately after container startup.
     fn network_mode_for(ir: &SandboxIR) -> &'static str {
+        if matches!(ir.egress_mode, Some(EgressMode::None)) {
+            return "none";
+        }
+        if matches!(ir.egress_mode, Some(EgressMode::Passthrough)) {
+            return "bridge";
+        }
         if ir.deny_by_default && ir.egress_allow.is_empty() {
             "none"
         } else {
@@ -72,6 +79,9 @@ impl DockerAdapter {
     }
 
     fn should_apply_egress_rules(ir: &SandboxIR) -> bool {
+        if !matches!(ir.egress_mode, None | Some(EgressMode::Proxy)) {
+            return false;
+        }
         ir.deny_by_default && !ir.egress_allow.is_empty()
     }
 

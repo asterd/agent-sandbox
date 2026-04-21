@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentsandbox.local/spec/sandbox.v1beta1.schema.json",
+  "title": "AgentSandbox v1beta1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "spec"],
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "sandbox.ai/v1beta1"
+    },
+    "kind": {
+      "type": "string",
+      "const": "Sandbox"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "labels": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime"],
+      "properties": {
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "image": { "type": "string" },
+            "preset": {
+              "type": "string",
+              "enum": ["python", "node", "rust", "shell", "custom"]
+            },
+            "version": { "type": "string", "minLength": 1 },
+            "env": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "workingDir": { "type": "string" }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cpuMillicores": { "type": "integer", "minimum": 0 },
+            "memoryMb": { "type": "integer", "minimum": 0 },
+            "diskMb": { "type": "integer", "minimum": 0 },
+            "timeoutMs": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "network": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["egress"],
+          "properties": {
+            "egress": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "allow": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "denyByDefault": { "type": "boolean", "default": true },
+                "mode": {
+                  "type": "string",
+                  "enum": ["none", "proxy", "passthrough"]
+                }
+              }
+            }
+          }
+        },
+        "secrets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "valueFrom"],
+            "properties": {
+              "name": { "type": "string" },
+              "valueFrom": {
+                "type": "object",
+                "additionalProperties": false,
+                "oneOf": [
+                  {
+                    "required": ["envRef"],
+                    "properties": {
+                      "envRef": { "type": "string" }
+                    }
+                  },
+                  {
+                    "required": ["file"],
+                    "properties": {
+                      "file": { "type": "string" }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "ttlSeconds": { "type": "integer", "minimum": 0 },
+        "scheduling": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "backend": { "type": "string", "minLength": 1 },
+            "preferWarm": { "type": "boolean" },
+            "priority": {
+              "type": "string",
+              "enum": ["low", "normal", "high"]
+            }
+          }
+        },
+        "storage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "volumes": {
+              "type": "array",
+              "items": { "type": "object" }
+            }
+          }
+        },
+        "observability": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "auditLevel": {
+              "type": "string",
+              "enum": ["none", "basic", "full"]
+            },
+            "metricsEnabled": { "type": "boolean" }
+          }
+        }
+      }
+    }
+  }
+}

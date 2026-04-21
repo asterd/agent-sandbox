@@ -4,7 +4,7 @@
 //! its result into a JSON body and lets the [`ApiError`] extractor do the
 //! status-code mapping; handlers never call `StatusCode` directly.
 
-use agentsandbox_core::{compile, AdapterError, SandboxStatus};
+use agentsandbox_core::{compile_value, AdapterError, SandboxStatus};
 use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap},
@@ -40,10 +40,7 @@ pub struct CreateResponse {
 
 /// Accept either `application/json` or `application/yaml` (+ `text/yaml`).
 /// Content-Type drives parsing; absent/unknown is treated as JSON.
-fn parse_spec_body(
-    headers: &HeaderMap,
-    body: &[u8],
-) -> Result<agentsandbox_core::SandboxSpec, ApiError> {
+fn parse_spec_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, ApiError> {
     let ct = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -61,11 +58,11 @@ pub async fn create_sandbox(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<(axum::http::StatusCode, Json<CreateResponse>), ApiError> {
-    let spec = parse_spec_body(&headers, &body)?;
+    let raw_spec = parse_spec_body(&headers, &body)?;
     // Keep the original submission for audit — reserialise as JSON so the
     // DB column format stays stable even when clients sent YAML.
-    let spec_json = serde_json::to_string(&spec)?;
-    let ir = compile(spec)?;
+    let spec_json = serde_json::to_string(&raw_spec)?;
+    let ir = compile_value(raw_spec)?;
 
     let lease_token = uuid::Uuid::new_v4().to_string();
     let backend = state.adapter.backend_name();
@@ -244,7 +241,9 @@ pub async fn list_sandboxes(
         .into_iter()
         .flatten()
         .collect();
-    Ok(Json(json!({ "items": items, "limit": limit, "offset": offset })))
+    Ok(Json(
+        json!({ "items": items, "limit": limit, "offset": offset }),
+    ))
 }
 
 // ---------- POST /v1/sandboxes/:id/exec ----------
@@ -262,11 +261,7 @@ pub struct ExecResponse {
     pub duration_ms: u64,
 }
 
-async fn require_lease(
-    state: &SharedState,
-    id: &str,
-    headers: &HeaderMap,
-) -> Result<(), ApiError> {
+async fn require_lease(state: &SharedState, id: &str, headers: &HeaderMap) -> Result<(), ApiError> {
     let token = headers
         .get(LEASE_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -339,6 +334,7 @@ pub async fn destroy_sandbox(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Body, http::Request};
     use std::sync::Arc;
 
     use agentsandbox_core::{ExecResult, SandboxAdapter, SandboxInfo};
@@ -346,8 +342,9 @@ mod tests {
     use chrono::{Duration, Utc};
     use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
     use std::str::FromStr;
+    use tower::ServiceExt;
 
-    use crate::state::AppState;
+    use crate::{router, state::AppState};
 
     enum InspectBehavior {
         Status(SandboxStatus),
@@ -360,11 +357,15 @@ mod tests {
 
     #[async_trait]
     impl SandboxAdapter for MockAdapter {
-        async fn create(&self, _ir: &agentsandbox_core::SandboxIR) -> Result<String, AdapterError> {
-            Err(AdapterError::Internal("unused".into()))
+        async fn create(&self, ir: &agentsandbox_core::SandboxIR) -> Result<String, AdapterError> {
+            Ok(ir.id.clone())
         }
 
-        async fn exec(&self, _sandbox_id: &str, _command: &str) -> Result<ExecResult, AdapterError> {
+        async fn exec(
+            &self,
+            _sandbox_id: &str,
+            _command: &str,
+        ) -> Result<ExecResult, AdapterError> {
             Err(AdapterError::Internal("unused".into()))
         }
 
@@ -455,5 +456,80 @@ mod tests {
 
         let persisted = store::get_sandbox(&db, "sb-2").await.unwrap().unwrap();
         assert_eq!(persisted.status, "stopped");
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_accepts_v1alpha1_json() {
+        let db = test_db().await;
+        let state = Arc::new(AppState {
+            db,
+            adapter: Arc::new(MockAdapter {
+                inspect_behavior: InspectBehavior::Status(SandboxStatus::Running),
+            }),
+        });
+        let app = router::build(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"apiVersion":"sandbox.ai/v1alpha1","kind":"Sandbox","metadata":{},"spec":{"runtime":{"preset":"python"}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_returns_structured_schema_errors() {
+        let db = test_db().await;
+        let state = Arc::new(AppState {
+            db,
+            adapter: Arc::new(MockAdapter {
+                inspect_behavior: InspectBehavior::Status(SandboxStatus::Running),
+            }),
+        });
+        let app = router::build(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{
+                            "apiVersion":"sandbox.ai/v1beta1",
+                            "kind":"Sandbox",
+                            "metadata":{},
+                            "spec":{
+                                "runtime":{"preset":"python"},
+                                "resources":{"cpuMillicores":-1},
+                                "network":{"egress":{"mode":"bogus"}}
+                            }
+                        }"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let details = &payload["error"]["details"]["validationErrors"];
+        assert!(details.is_array());
+        assert!(details.as_array().unwrap().len() >= 2);
     }
 }

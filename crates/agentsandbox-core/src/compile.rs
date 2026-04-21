@@ -1,23 +1,70 @@
-//! Spec → IR compile pipeline.
-//!
-//! Validation rules in one place:
-//! * apiVersion must be supported
-//! * runtime.image or runtime.preset must be set (preset=Custom requires image)
-//! * egress.allow hostnames must not be IPs, wildcards or paths
-//! * secrets must resolve against the host
-//!
-//! Every invalid input returns a [`CompileError`]; `compile` never panics.
+//! Spec -> IR compile pipeline.
 
 use crate::{
     ir::SandboxIR,
-    spec::{RuntimePreset, RuntimeSpec, SandboxSpec, SecretRef, API_VERSION_V1ALPHA1},
+    schema::validate_raw,
+    spec::{
+        NetworkSpec, NetworkSpecV1Beta1, ResourceSpec, ResourceSpecV1Beta1, RuntimePreset,
+        SandboxSpec, SecretRef, SpecV1Beta1, API_VERSION_V1ALPHA1, API_VERSION_V1BETA1,
+    },
 };
+use serde_json::Value;
 use thiserror::Error;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecVersion {
+    V1Alpha1,
+    V1Beta1,
+}
+
+impl SpecVersion {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SpecVersion::V1Alpha1 => API_VERSION_V1ALPHA1,
+            SpecVersion::V1Beta1 => API_VERSION_V1BETA1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationIssue {
+    pub path: String,
+    pub message: String,
+}
+
+impl ValidationIssue {
+    fn from_schema_path(path: String, message: String) -> Self {
+        Self { path, message }
+    }
+}
+
+impl<'a> From<jsonschema::ValidationError<'a>> for ValidationIssue {
+    fn from(value: jsonschema::ValidationError<'a>) -> Self {
+        let raw_path = value.instance_path.to_string();
+        let path = if raw_path.is_empty() {
+            "/".to_string()
+        } else if raw_path.starts_with('/') {
+            raw_path
+        } else {
+            format!("/{}", raw_path)
+        };
+        Self::from_schema_path(path, value.to_string())
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum CompileError {
+    #[error("apiVersion mancante")]
+    MissingApiVersion,
     #[error("apiVersion non supportata: {0}")]
     UnsupportedApiVersion(String),
+    #[error("payload non valido: {0}")]
+    ParseError(String),
+    #[error("spec {version:?} non valida")]
+    SchemaValidation {
+        version: SpecVersion,
+        issues: Vec<ValidationIssue>,
+    },
     #[error("kind non supportato: {0}")]
     UnsupportedKind(String),
     #[error("runtime.preset e runtime.image non possono essere entrambi assenti")]
@@ -32,8 +79,45 @@ pub enum CompileError {
     InvalidHostname(String),
 }
 
-/// Compile a validated public spec into the backend-agnostic [`SandboxIR`].
+pub fn detect_version(raw: &Value) -> Result<SpecVersion, CompileError> {
+    match raw.get("apiVersion").and_then(Value::as_str) {
+        Some(API_VERSION_V1ALPHA1) => Ok(SpecVersion::V1Alpha1),
+        Some(API_VERSION_V1BETA1) => Ok(SpecVersion::V1Beta1),
+        Some(v) => Err(CompileError::UnsupportedApiVersion(v.to_string())),
+        None => Err(CompileError::MissingApiVersion),
+    }
+}
+
+pub fn compile_any(raw: &str) -> Result<SandboxIR, CompileError> {
+    let value: Value = serde_json::from_str(raw)
+        .or_else(|_| serde_yaml::from_str::<Value>(raw))
+        .map_err(|e| CompileError::ParseError(e.to_string()))?;
+    compile_value(value)
+}
+
+pub fn compile_value(value: Value) -> Result<SandboxIR, CompileError> {
+    let version = detect_version(&value)?;
+    validate_raw(version, &value)?;
+
+    match version {
+        SpecVersion::V1Alpha1 => {
+            let spec: SandboxSpec = serde_json::from_value(value)
+                .map_err(|e| CompileError::ParseError(e.to_string()))?;
+            compile_v1alpha1(spec)
+        }
+        SpecVersion::V1Beta1 => {
+            let spec: SpecV1Beta1 = serde_json::from_value(value)
+                .map_err(|e| CompileError::ParseError(e.to_string()))?;
+            compile_v1beta1(spec)
+        }
+    }
+}
+
 pub fn compile(spec: SandboxSpec) -> Result<SandboxIR, CompileError> {
+    compile_v1alpha1(spec)
+}
+
+fn compile_v1alpha1(spec: SandboxSpec) -> Result<SandboxIR, CompileError> {
     if spec.api_version != API_VERSION_V1ALPHA1 {
         return Err(CompileError::UnsupportedApiVersion(spec.api_version));
     }
@@ -43,7 +127,7 @@ pub fn compile(spec: SandboxSpec) -> Result<SandboxIR, CompileError> {
 
     let body = spec.spec;
     let mut ir = SandboxIR {
-        image: resolve_image(&body.runtime)?,
+        image: resolve_image(&body.runtime.image, body.runtime.preset, None)?,
         ..SandboxIR::default()
     };
 
@@ -51,7 +135,70 @@ pub fn compile(spec: SandboxSpec) -> Result<SandboxIR, CompileError> {
         ir.working_dir = wd;
     }
 
-    if let Some(res) = body.resources {
+    apply_resources(&mut ir, body.resources);
+    apply_network_alpha(&mut ir, body.network)?;
+    apply_secrets(&mut ir, body.secrets)?;
+    apply_runtime_env(&mut ir, body.runtime.env);
+
+    if let Some(ttl) = body.ttl_seconds {
+        ir.ttl_seconds = ttl;
+    }
+    if let Some(scheduling) = body.scheduling {
+        ir.prefer_warm = scheduling.prefer_warm;
+    }
+
+    Ok(ir)
+}
+
+fn compile_v1beta1(spec: SpecV1Beta1) -> Result<SandboxIR, CompileError> {
+    if spec.api_version != API_VERSION_V1BETA1 {
+        return Err(CompileError::UnsupportedApiVersion(spec.api_version));
+    }
+    if spec.kind != "Sandbox" {
+        return Err(CompileError::UnsupportedKind(spec.kind));
+    }
+
+    let body = spec.spec;
+    let mut ir = SandboxIR {
+        image: resolve_image(
+            &body.runtime.image,
+            body.runtime.preset,
+            body.runtime.version.as_deref(),
+        )?,
+        runtime_version: body.runtime.version,
+        ..SandboxIR::default()
+    };
+
+    if let Some(wd) = body.runtime.working_dir {
+        ir.working_dir = wd;
+    }
+
+    apply_resources_v1beta1(&mut ir, body.resources);
+    apply_network_v1beta1(&mut ir, body.network)?;
+    apply_secrets(&mut ir, body.secrets)?;
+    apply_runtime_env(&mut ir, body.runtime.env);
+
+    if let Some(ttl) = body.ttl_seconds {
+        ir.ttl_seconds = ttl;
+    }
+    if let Some(scheduling) = body.scheduling {
+        ir.backend_hint = scheduling.backend;
+        ir.prefer_warm = scheduling.prefer_warm;
+        ir.priority = scheduling.priority;
+    }
+    if let Some(storage) = body.storage {
+        ir.storage_volumes = storage.volumes;
+    }
+    if let Some(observability) = body.observability {
+        ir.audit_level = observability.audit_level;
+        ir.metrics_enabled = observability.metrics_enabled.unwrap_or(false);
+    }
+
+    Ok(ir)
+}
+
+fn apply_resources(ir: &mut SandboxIR, resources: Option<ResourceSpec>) {
+    if let Some(res) = resources {
         if let Some(v) = res.cpu_millicores {
             ir.cpu_millicores = v;
         }
@@ -62,50 +209,94 @@ pub fn compile(spec: SandboxSpec) -> Result<SandboxIR, CompileError> {
             ir.disk_mb = v;
         }
     }
+}
 
-    if let Some(net) = body.network {
+fn apply_resources_v1beta1(ir: &mut SandboxIR, resources: Option<ResourceSpecV1Beta1>) {
+    if let Some(res) = resources {
+        if let Some(v) = res.cpu_millicores {
+            ir.cpu_millicores = v;
+        }
+        if let Some(v) = res.memory_mb {
+            ir.memory_mb = v;
+        }
+        if let Some(v) = res.disk_mb {
+            ir.disk_mb = v;
+        }
+        ir.exec_timeout_ms = res.timeout_ms;
+    }
+}
+
+fn apply_network_alpha(
+    ir: &mut SandboxIR,
+    network: Option<NetworkSpec>,
+) -> Result<(), CompileError> {
+    if let Some(net) = network {
         for host in &net.egress.allow {
             validate_hostname(host)?;
         }
         ir.egress_allow = net.egress.allow;
         ir.deny_by_default = net.egress.deny_by_default;
     }
+    Ok(())
+}
 
-    if let Some(secrets) = body.secrets {
-        for s in &secrets {
-            let value = resolve_secret(s)?;
-            ir.secret_env.push((s.name.clone(), value));
+fn apply_network_v1beta1(
+    ir: &mut SandboxIR,
+    network: Option<NetworkSpecV1Beta1>,
+) -> Result<(), CompileError> {
+    if let Some(net) = network {
+        for host in &net.egress.allow {
+            validate_hostname(host)?;
         }
+        ir.egress_allow = net.egress.allow;
+        ir.deny_by_default = net.egress.deny_by_default;
+        ir.egress_mode = net.egress.mode;
     }
+    Ok(())
+}
 
-    if let Some(ttl) = body.ttl_seconds {
-        ir.ttl_seconds = ttl;
-    }
-
-    if let Some(env) = body.runtime.env {
+fn apply_runtime_env(ir: &mut SandboxIR, env: Option<std::collections::HashMap<String, String>>) {
+    if let Some(env) = env {
         ir.env = env.into_iter().collect();
         ir.env.sort_by(|a, b| a.0.cmp(&b.0));
     }
-
-    Ok(ir)
 }
 
-fn resolve_image(runtime: &RuntimeSpec) -> Result<String, CompileError> {
-    if let Some(image) = &runtime.image {
+fn apply_secrets(ir: &mut SandboxIR, secrets: Option<Vec<SecretRef>>) -> Result<(), CompileError> {
+    if let Some(secrets) = secrets {
+        for secret in &secrets {
+            let value = resolve_secret(secret)?;
+            ir.secret_env.push((secret.name.clone(), value));
+        }
+    }
+    Ok(())
+}
+
+fn resolve_image(
+    image: &Option<String>,
+    preset: Option<RuntimePreset>,
+    version: Option<&str>,
+) -> Result<String, CompileError> {
+    if let Some(image) = image {
         return Ok(image.clone());
     }
-    match runtime.preset {
-        Some(RuntimePreset::Python) => Ok("python:3.12-slim".into()),
-        Some(RuntimePreset::Node) => Ok("node:20-slim".into()),
-        Some(RuntimePreset::Rust) => Ok("rust:1.77-slim".into()),
-        Some(RuntimePreset::Shell) => Ok("ubuntu:24.04".into()),
-        Some(RuntimePreset::Custom) => Err(CompileError::CustomPresetNeedsImage),
-        None => Err(CompileError::MissingRuntime),
+
+    match (preset, version) {
+        (Some(RuntimePreset::Python), Some(version)) => Ok(format!("python:{version}-slim")),
+        (Some(RuntimePreset::Node), Some(version)) => Ok(format!("node:{version}-slim")),
+        (Some(RuntimePreset::Rust), Some(version)) => Ok(format!("rust:{version}-slim")),
+        (Some(RuntimePreset::Shell), Some(version)) => Ok(format!("ubuntu:{version}")),
+        (Some(RuntimePreset::Python), None) => Ok("python:3.12-slim".into()),
+        (Some(RuntimePreset::Node), None) => Ok("node:20-slim".into()),
+        (Some(RuntimePreset::Rust), None) => Ok("rust:1.77-slim".into()),
+        (Some(RuntimePreset::Shell), None) => Ok("ubuntu:24.04".into()),
+        (Some(RuntimePreset::Custom), _) => Err(CompileError::CustomPresetNeedsImage),
+        (None, _) => Err(CompileError::MissingRuntime),
     }
 }
 
-fn resolve_secret(s: &SecretRef) -> Result<String, CompileError> {
-    match (&s.value_from.env_ref, &s.value_from.file) {
+fn resolve_secret(secret: &SecretRef) -> Result<String, CompileError> {
+    match (&secret.value_from.env_ref, &secret.value_from.file) {
         (Some(name), None) => {
             std::env::var(name).map_err(|_| CompileError::SecretNotFound(name.clone()))
         }
@@ -113,7 +304,7 @@ fn resolve_secret(s: &SecretRef) -> Result<String, CompileError> {
             .map(|raw| raw.trim().to_string())
             .map_err(|_| CompileError::SecretNotFound(path.clone())),
         _ => Err(CompileError::InvalidSecretSource {
-            name: s.name.clone(),
+            name: secret.name.clone(),
         }),
     }
 }
@@ -133,7 +324,9 @@ fn validate_hostname(host: &str) -> Result<(), CompileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::SandboxSpec;
+    use crate::spec::{
+        AuditLevel, EgressMode, SandboxSpec, SchedulingPriority, API_VERSION_V1BETA1,
+    };
 
     fn parse(yaml: &str) -> SandboxSpec {
         serde_yaml::from_str(yaml).expect("YAML di test deve essere valido")
@@ -147,6 +340,89 @@ mod tests {
              spec:\n  runtime:\n    preset: {}\n",
             preset
         ))
+    }
+
+    #[test]
+    fn detects_both_supported_versions() {
+        let alpha = serde_json::json!({ "apiVersion": "sandbox.ai/v1alpha1" });
+        let beta = serde_json::json!({ "apiVersion": API_VERSION_V1BETA1 });
+        assert_eq!(detect_version(&alpha).unwrap(), SpecVersion::V1Alpha1);
+        assert_eq!(detect_version(&beta).unwrap(), SpecVersion::V1Beta1);
+    }
+
+    #[test]
+    fn compile_any_accepts_v1alpha1_json() {
+        let raw = r#"{
+          "apiVersion":"sandbox.ai/v1alpha1",
+          "kind":"Sandbox",
+          "metadata":{},
+          "spec":{"runtime":{"preset":"python"}}
+        }"#;
+        let ir = compile_any(raw).unwrap();
+        assert_eq!(ir.image, "python:3.12-slim");
+    }
+
+    #[test]
+    fn compile_any_accepts_v1beta1_yaml() {
+        let raw = r#"
+apiVersion: sandbox.ai/v1beta1
+kind: Sandbox
+metadata: {}
+spec:
+  runtime:
+    preset: python
+    version: "3.11"
+  resources:
+    timeoutMs: 45000
+  network:
+    egress:
+      allow: ["pypi.org"]
+      denyByDefault: true
+      mode: proxy
+  scheduling:
+    backend: docker
+    preferWarm: true
+    priority: high
+  storage:
+    volumes: []
+  observability:
+    auditLevel: full
+    metricsEnabled: true
+"#;
+        let ir = compile_any(raw).unwrap();
+        assert_eq!(ir.image, "python:3.11-slim");
+        assert_eq!(ir.exec_timeout_ms, Some(45000));
+        assert_eq!(ir.egress_mode, Some(EgressMode::Proxy));
+        assert_eq!(ir.backend_hint.as_deref(), Some("docker"));
+        assert!(ir.prefer_warm);
+        assert_eq!(ir.priority, Some(SchedulingPriority::High));
+        assert_eq!(ir.audit_level, Some(AuditLevel::Full));
+        assert!(ir.metrics_enabled);
+    }
+
+    #[test]
+    fn schema_validation_collects_field_errors() {
+        let raw = serde_json::json!({
+            "apiVersion": "sandbox.ai/v1beta1",
+            "kind": "Sandbox",
+            "metadata": {},
+            "spec": {
+                "runtime": { "preset": "python" },
+                "resources": { "cpuMillicores": -1 },
+                "network": { "egress": { "mode": "bogus" } }
+            }
+        });
+        let err = compile_value(raw).unwrap_err();
+        match err {
+            CompileError::SchemaValidation { issues, .. } => {
+                assert!(issues.len() >= 2);
+                assert!(issues
+                    .iter()
+                    .any(|issue| issue.path.contains("cpuMillicores")));
+                assert!(issues.iter().any(|issue| issue.path.contains("mode")));
+            }
+            other => panic!("errore inatteso: {other:?}"),
+        }
     }
 
     #[test]
@@ -327,7 +603,7 @@ mod tests {
                \n  network:\n    egress:\n      allow: [\"pypi.org\"]\n",
         );
         let ir = compile(spec).unwrap();
-        assert!(ir.deny_by_default, "denyByDefault deve essere true di default");
+        assert!(ir.deny_by_default);
     }
 
     #[test]
@@ -351,8 +627,6 @@ mod tests {
     #[test]
     fn test_secret_from_env_is_resolved() {
         let var_name = "AGENTSANDBOX_TEST_SECRET_OK";
-        // Safety: tests run single-threaded per binary in cargo test by default
-        // for this crate (no multi-threaded access to shared env in this test).
         std::env::set_var(var_name, "deadbeef");
 
         let spec = parse(&format!(
@@ -407,7 +681,10 @@ mod tests {
              spec:\n  runtime:\n    preset: python\n\
                \n  secrets:\n    - name: MY_SECRET\n      valueFrom:\n        envRef: AGENTSANDBOX_DEFINITELY_MISSING_XYZ\n",
         );
-        assert!(matches!(compile(spec), Err(CompileError::SecretNotFound(_))));
+        assert!(matches!(
+            compile(spec),
+            Err(CompileError::SecretNotFound(_))
+        ));
     }
 
     #[test]
@@ -424,7 +701,7 @@ mod tests {
 
     #[test]
     fn test_unknown_top_level_field_is_error() {
-        let err = serde_yaml::from_str::<SandboxSpec>(
+        let err = compile_any(
             "apiVersion: sandbox.ai/v1alpha1\n\
              kind: Sandbox\n\
              metadata: {}\n\
@@ -432,18 +709,18 @@ mod tests {
              spec:\n  runtime:\n    preset: python\n",
         )
         .unwrap_err();
-        assert!(err.to_string().contains("unexpected"));
+        assert!(matches!(err, CompileError::SchemaValidation { .. }));
     }
 
     #[test]
     fn test_unknown_runtime_field_is_error() {
-        let err = serde_yaml::from_str::<SandboxSpec>(
+        let err = compile_any(
             "apiVersion: sandbox.ai/v1alpha1\n\
              kind: Sandbox\n\
              metadata: {}\n\
              spec:\n  runtime:\n    preset: python\n    bogus: true\n",
         )
         .unwrap_err();
-        assert!(err.to_string().contains("bogus"));
+        assert!(matches!(err, CompileError::SchemaValidation { .. }));
     }
 }

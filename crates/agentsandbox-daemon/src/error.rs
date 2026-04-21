@@ -11,6 +11,7 @@
 //! surfaced verbatim — we map them to stable codes.
 
 use agentsandbox_core::adapter::AdapterError;
+use agentsandbox_core::compile::CompileError;
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -90,8 +91,16 @@ impl ApiError {
         Self::new(ApiErrorCode::SpecInvalid, msg)
     }
 
+    pub fn with_details(mut self, details: Value) -> Self {
+        self.details = Some(details);
+        self
+    }
+
     pub fn lease_invalid() -> Self {
-        Self::new(ApiErrorCode::LeaseInvalid, "lease token mancante o non valido")
+        Self::new(
+            ApiErrorCode::LeaseInvalid,
+            "lease token mancante o non valido",
+        )
     }
 
     pub fn internal(msg: impl Into<String>) -> Self {
@@ -132,9 +141,24 @@ impl From<serde_yaml::Error> for ApiError {
     }
 }
 
-impl From<agentsandbox_core::compile::CompileError> for ApiError {
-    fn from(e: agentsandbox_core::compile::CompileError) -> Self {
-        ApiError::spec_invalid(e.to_string())
+impl From<CompileError> for ApiError {
+    fn from(e: CompileError) -> Self {
+        match e {
+            CompileError::SchemaValidation { version, issues } => {
+                ApiError::spec_invalid(format!("spec {} non valida", version.as_str()))
+                    .with_details(json!({
+                        "apiVersion": version.as_str(),
+                        "validationErrors": issues
+                            .into_iter()
+                            .map(|issue| json!({
+                                "path": issue.path,
+                                "message": issue.message,
+                            }))
+                            .collect::<Vec<_>>()
+                    }))
+            }
+            other => ApiError::spec_invalid(other.to_string()),
+        }
     }
 }
 

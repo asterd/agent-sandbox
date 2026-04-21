@@ -4,6 +4,7 @@
 //! contains resolved values (no presets, no host-env lookups, no wildcards).
 //! Backend adapters depend only on this type.
 
+use crate::spec::{AuditLevel, EgressMode, SchedulingPriority};
 use std::fmt;
 
 /// Resolved, backend-agnostic sandbox definition.
@@ -28,8 +29,17 @@ pub struct SandboxIR {
     pub disk_mb: u32,
     pub egress_allow: Vec<String>,
     pub deny_by_default: bool,
+    pub egress_mode: Option<EgressMode>,
     pub ttl_seconds: u64,
+    pub exec_timeout_ms: Option<u64>,
     pub working_dir: String,
+    pub runtime_version: Option<String>,
+    pub backend_hint: Option<String>,
+    pub prefer_warm: bool,
+    pub priority: Option<SchedulingPriority>,
+    pub storage_volumes: Vec<serde_json::Value>,
+    pub audit_level: Option<AuditLevel>,
+    pub metrics_enabled: bool,
 }
 
 impl Default for SandboxIR {
@@ -45,8 +55,17 @@ impl Default for SandboxIR {
             disk_mb: 1024,
             egress_allow: Vec::new(),
             deny_by_default: true,
+            egress_mode: None,
             ttl_seconds: 300,
+            exec_timeout_ms: None,
             working_dir: "/workspace".into(),
+            runtime_version: None,
+            backend_hint: None,
+            prefer_warm: false,
+            priority: None,
+            storage_volumes: Vec::new(),
+            audit_level: None,
+            metrics_enabled: false,
         }
     }
 }
@@ -70,8 +89,17 @@ impl fmt::Debug for SandboxIR {
             .field("disk_mb", &self.disk_mb)
             .field("egress_allow", &self.egress_allow)
             .field("deny_by_default", &self.deny_by_default)
+            .field("egress_mode", &self.egress_mode)
             .field("ttl_seconds", &self.ttl_seconds)
+            .field("exec_timeout_ms", &self.exec_timeout_ms)
             .field("working_dir", &self.working_dir)
+            .field("runtime_version", &self.runtime_version)
+            .field("backend_hint", &self.backend_hint)
+            .field("prefer_warm", &self.prefer_warm)
+            .field("priority", &self.priority)
+            .field("storage_volumes", &self.storage_volumes)
+            .field("audit_level", &self.audit_level)
+            .field("metrics_enabled", &self.metrics_enabled)
             .finish()
     }
 }
@@ -93,6 +121,15 @@ mod tests {
         assert!(ir.egress_allow.is_empty());
         assert!(ir.env.is_empty());
         assert!(ir.secret_env.is_empty());
+        assert!(ir.egress_mode.is_none());
+        assert!(ir.exec_timeout_ms.is_none());
+        assert!(ir.runtime_version.is_none());
+        assert!(ir.backend_hint.is_none());
+        assert!(!ir.prefer_warm);
+        assert!(ir.priority.is_none());
+        assert!(ir.storage_volumes.is_empty());
+        assert!(ir.audit_level.is_none());
+        assert!(!ir.metrics_enabled);
         assert!(!ir.id.is_empty());
     }
 

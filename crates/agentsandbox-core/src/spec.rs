@@ -1,26 +1,35 @@
-//! Public sandbox specification (`sandbox.ai/v1alpha1`).
+//! Public sandbox specifications.
 //!
-//! This module is the public contract between agents/SDKs and the daemon.
-//! Anything not expressed here is not part of the API and should not be relied
-//! upon. Adding or removing a field is a spec-version change.
+//! `v1alpha1` remains supported as-is. `v1beta1` is additive only and extends
+//! the public contract without removing or renaming any `v1alpha1` field.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 
-/// The current supported API version string.
 pub const API_VERSION_V1ALPHA1: &str = "sandbox.ai/v1alpha1";
+pub const API_VERSION_V1BETA1: &str = "sandbox.ai/v1beta1";
 
-/// Root document: a sandbox specification in YAML or JSON form.
+pub type SandboxSpec = SpecV1Alpha1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SandboxSpec {
-    /// API version string, e.g. `"sandbox.ai/v1alpha1"`.
+pub struct SpecV1Alpha1 {
     pub api_version: String,
-    /// Kind, always `"Sandbox"` in v1alpha1.
     pub kind: String,
     #[serde(default)]
     pub metadata: Metadata,
     pub spec: SandboxSpecBody,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SpecV1Beta1 {
+    pub api_version: String,
+    pub kind: String,
+    #[serde(default)]
+    pub metadata: Metadata,
+    pub spec: SandboxSpecBodyV1Beta1,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -41,13 +50,34 @@ pub struct SandboxSpecBody {
     pub scheduling: Option<SchedulingSpec>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SandboxSpecBodyV1Beta1 {
+    pub runtime: RuntimeSpecV1Beta1,
+    pub resources: Option<ResourceSpecV1Beta1>,
+    pub network: Option<NetworkSpecV1Beta1>,
+    pub secrets: Option<Vec<SecretRef>>,
+    pub ttl_seconds: Option<u64>,
+    pub scheduling: Option<SchedulingSpecV1Beta1>,
+    pub storage: Option<StorageSpec>,
+    pub observability: Option<ObservabilitySpec>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeSpec {
-    /// Explicit docker image. When set, overrides `preset`.
     pub image: Option<String>,
     pub preset: Option<RuntimePreset>,
-    /// Non-secret environment variables forwarded to the guest.
+    pub env: Option<HashMap<String, String>>,
+    pub working_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeSpecV1Beta1 {
+    pub image: Option<String>,
+    pub preset: Option<RuntimePreset>,
+    pub version: Option<String>,
     pub env: Option<HashMap<String, String>>,
     pub working_dir: Option<String>,
 }
@@ -55,27 +85,28 @@ pub struct RuntimeSpec {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum RuntimePreset {
-    /// `python:3.12-slim`
     Python,
-    /// `node:20-slim`
     Node,
-    /// `rust:1.77-slim`
     Rust,
-    /// `ubuntu:24.04`
     Shell,
-    /// Requires an explicit `runtime.image`.
     Custom,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResourceSpec {
-    /// CPU budget in millicores. Default: 1000 (= 1 CPU).
     pub cpu_millicores: Option<u32>,
-    /// Memory limit in MiB. Default: 512.
     pub memory_mb: Option<u32>,
-    /// Ephemeral disk limit in MiB. Default: 1024.
     pub disk_mb: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceSpecV1Beta1 {
+    pub cpu_millicores: Option<u32>,
+    pub memory_mb: Option<u32>,
+    pub disk_mb: Option<u32>,
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,50 +116,57 @@ pub struct NetworkSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkSpecV1Beta1 {
+    pub egress: EgressPolicyV1Beta1,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EgressPolicy {
-    /// Allowed egress hostnames (no wildcards, no IPs).
     #[serde(default)]
     pub allow: Vec<String>,
-    /// Deny all egress not in `allow`. Defaults to `true`.
     #[serde(default = "default_true")]
     pub deny_by_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EgressPolicyV1Beta1 {
+    #[serde(default)]
+    pub allow: Vec<String>,
+    #[serde(default = "default_true")]
+    pub deny_by_default: bool,
+    pub mode: Option<EgressMode>,
 }
 
 fn default_true() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum EgressMode {
+    None,
+    Proxy,
+    Passthrough,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SecretRef {
-    /// Guest-side env var name the secret is bound to.
     pub name: String,
     pub value_from: SecretSource,
 }
 
-/// Where the secret value is sourced from on the host.
-///
-/// Secret values are resolved by the daemon and never appear in the public
-/// spec payload or in any log output.
-///
-/// Represented as a map with exactly one key (`envRef` or `file`):
-///
-/// ```yaml
-/// valueFrom:
-///   envRef: MY_HOST_ENV
-/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SecretSource {
-    /// Read the secret from a host environment variable.
     pub env_ref: Option<String>,
-    /// Read the secret from a file on the host.
     pub file: Option<String>,
 }
 
 impl SecretSource {
-    /// Build an `envRef` source.
     pub fn env_ref(name: impl Into<String>) -> Self {
         Self {
             env_ref: Some(name.into()),
@@ -136,7 +174,6 @@ impl SecretSource {
         }
     }
 
-    /// Build a `file` source.
     pub fn file(path: impl Into<String>) -> Self {
         Self {
             env_ref: None,
@@ -148,7 +185,45 @@ impl SecretSource {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SchedulingSpec {
-    /// Prefer reusing a warm sandbox pool. Ignored in v1alpha1.
     #[serde(default)]
     pub prefer_warm: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SchedulingSpecV1Beta1 {
+    pub backend: Option<String>,
+    #[serde(default)]
+    pub prefer_warm: bool,
+    pub priority: Option<SchedulingPriority>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SchedulingPriority {
+    Low,
+    Normal,
+    High,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StorageSpec {
+    #[serde(default)]
+    pub volumes: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ObservabilitySpec {
+    pub audit_level: Option<AuditLevel>,
+    pub metrics_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AuditLevel {
+    None,
+    Basic,
+    Full,
 }

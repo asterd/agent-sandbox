@@ -53,7 +53,7 @@ Response:
 
 ### `POST /v1/sandboxes`
 
-Create a sandbox from a `sandbox.ai/v1alpha1` spec.
+Create a sandbox from a `sandbox.ai/v1alpha1` or `sandbox.ai/v1beta1` spec.
 
 Minimal request:
 
@@ -99,6 +99,37 @@ spec:
     preset: python
   ttlSeconds: 300
 EOF
+```
+
+Minimal `v1beta1` request:
+
+```bash
+curl -sS \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "apiVersion": "sandbox.ai/v1beta1",
+    "kind": "Sandbox",
+    "metadata": {},
+    "spec": {
+      "runtime": { "preset": "python", "version": "3.12" },
+      "resources": { "timeoutMs": 30000 },
+      "network": {
+        "egress": {
+          "allow": ["pypi.org"],
+          "denyByDefault": true,
+          "mode": "proxy"
+        }
+      },
+      "scheduling": {
+        "backend": "docker",
+        "priority": "normal",
+        "preferWarm": false
+      },
+      "storage": { "volumes": [] },
+      "observability": { "auditLevel": "basic", "metricsEnabled": false }
+    }
+  }' \
+  http://127.0.0.1:7847/v1/sandboxes
 ```
 
 ### `GET /v1/sandboxes`
@@ -228,8 +259,16 @@ curl -sS \
 {
   "error": {
     "code": "SPEC_INVALID",
-    "message": "apiVersion non supportata: sandbox.ai/v2",
-    "details": {}
+    "message": "spec sandbox.ai/v1beta1 non valida",
+    "details": {
+      "apiVersion": "sandbox.ai/v1beta1",
+      "validationErrors": [
+        {
+          "path": "/spec/resources/cpuMillicores",
+          "message": "/spec/resources/cpuMillicores is less than the minimum of 0"
+        }
+      ]
+    }
   }
 }
 ```

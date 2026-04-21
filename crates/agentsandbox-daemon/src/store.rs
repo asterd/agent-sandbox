@@ -6,7 +6,7 @@
 //! unit-tested helpers.
 
 use agentsandbox_core::ir::SandboxIR;
-use agentsandbox_core::SandboxStatus;
+use agentsandbox_core::{AuditLevel, EgressMode, SandboxStatus, SchedulingPriority};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -28,8 +28,17 @@ pub struct StoredIr {
     pub disk_mb: u32,
     pub egress_allow: Vec<String>,
     pub deny_by_default: bool,
+    pub egress_mode: Option<EgressMode>,
     pub ttl_seconds: u64,
+    pub exec_timeout_ms: Option<u64>,
     pub working_dir: String,
+    pub runtime_version: Option<String>,
+    pub backend_hint: Option<String>,
+    pub prefer_warm: bool,
+    pub priority: Option<SchedulingPriority>,
+    pub storage_volumes: Vec<serde_json::Value>,
+    pub audit_level: Option<AuditLevel>,
+    pub metrics_enabled: bool,
 }
 
 impl From<&SandboxIR> for StoredIr {
@@ -44,8 +53,17 @@ impl From<&SandboxIR> for StoredIr {
             disk_mb: ir.disk_mb,
             egress_allow: ir.egress_allow.clone(),
             deny_by_default: ir.deny_by_default,
+            egress_mode: ir.egress_mode,
             ttl_seconds: ir.ttl_seconds,
+            exec_timeout_ms: ir.exec_timeout_ms,
             working_dir: ir.working_dir.clone(),
+            runtime_version: ir.runtime_version.clone(),
+            backend_hint: ir.backend_hint.clone(),
+            prefer_warm: ir.prefer_warm,
+            priority: ir.priority,
+            storage_volumes: ir.storage_volumes.clone(),
+            audit_level: ir.audit_level,
+            metrics_enabled: ir.metrics_enabled,
         }
     }
 }
@@ -92,7 +110,10 @@ pub struct NewSandbox<'a> {
     pub ttl_seconds: u64,
 }
 
-pub async fn insert_sandbox(pool: &SqlitePool, new: NewSandbox<'_>) -> Result<SandboxRow, ApiError> {
+pub async fn insert_sandbox(
+    pool: &SqlitePool,
+    new: NewSandbox<'_>,
+) -> Result<SandboxRow, ApiError> {
     let created_at = Utc::now();
     let expires_at = created_at + chrono::Duration::seconds(new.ttl_seconds as i64);
     let ir_json = serde_json::to_string(&StoredIr::from(new.ir))?;
@@ -167,7 +188,10 @@ pub async fn list_active(
     .bind(offset)
     .fetch_all(pool)
     .await?;
-    rows.iter().map(SandboxRow::from_row).collect::<Result<_, _>>().map_err(Into::into)
+    rows.iter()
+        .map(SandboxRow::from_row)
+        .collect::<Result<_, _>>()
+        .map_err(Into::into)
 }
 
 pub async fn list_expired(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<String>, ApiError> {
