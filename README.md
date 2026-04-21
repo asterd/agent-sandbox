@@ -27,6 +27,7 @@ Current limits that matter:
 - Docker is the only backend
 - `network.egress` in `v1alpha1` is hostname-based and resolved once at sandbox creation
 - egress enforcement relies on `iptables` inside the guest when an allowlist is configured
+- the planned stable replacement for filtered egress is the proxy L4 path in `ROADMAP_STABLE.md` FASE C
 - the SDKs are local workspace packages in this repository; registry publishing is not part of the current phase
 
 ## Architecture
@@ -109,7 +110,6 @@ async def main() -> None:
     async with Sandbox(
         runtime="python",
         ttl=300,
-        egress=["pypi.org", "files.pythonhosted.org"],
     ) as sb:
         result = await sb.exec("python -c 'print(42)'")
         print(result.stdout, end="")
@@ -132,7 +132,6 @@ import { Sandbox } from "agentsandbox";
 await using sb = await Sandbox.create({
   runtime: "python",
   ttl: 300,
-  egress: ["pypi.org", "files.pythonhosted.org"],
 });
 
 const result = await sb.exec("python -c 'print(42)'");
@@ -155,6 +154,7 @@ console.log(result.stdout.trim());
 - wildcard hostnames such as `*.example.com` are rejected
 - direct IPs in `egress.allow` are rejected
 - if the runtime image cannot enforce the allowlist, sandbox creation fails instead of degrading to open egress
+- the planned stable replacement for this mechanism is the proxy L4 design in `ROADMAP_STABLE.md` FASE C
 
 ### API and SDK behavior
 

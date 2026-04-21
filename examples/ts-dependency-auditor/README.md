@@ -1,12 +1,11 @@
 # TypeScript Dependency Auditor
 
-This example copies a `package.json` into a sandbox, installs dependencies with a restricted egress allowlist, runs `npm audit`, and asks Claude for a short summary.
+This example copies a `package.json` into a sandbox, installs dependencies, runs `npm audit`, and asks Claude for a short summary.
 
 ## What it demonstrates
 
 - local TypeScript SDK usage
 - sandboxed dependency installation
-- `network.egress` allowlist for npm registries
 - CI-friendly exit code when critical vulnerabilities are found
 
 ## Setup
@@ -62,3 +61,8 @@ Claude summary:
 ```
 
 The process exits with code `1` when `Critical` is greater than zero.
+
+Note:
+
+- the current alpha keeps this example on open egress for reliability with the stock Node preset
+- the planned stable replacement for filtered egress is the proxy L4 path in `ROADMAP_STABLE.md` FASE C

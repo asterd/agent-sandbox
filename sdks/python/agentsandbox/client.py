@@ -69,8 +69,12 @@ class Sandbox:
         egress: list[str] | None = None,
         memory_mb: int = 512,
         cpu_millicores: int = 1000,
+        disk_mb: int = 1024,
         env: dict[str, str] | None = None,
         secrets: dict[str, str] | None = None,
+        secret_files: dict[str, str] | None = None,
+        working_dir: str | None = None,
+        prefer_warm: bool = False,
         daemon_url: str = DEFAULT_DAEMON_URL,
         timeout: float = DEFAULT_TIMEOUT,
         client: httpx.AsyncClient | None = None,
@@ -82,8 +86,12 @@ class Sandbox:
             egress=list(egress or []),
             memory_mb=memory_mb,
             cpu_millicores=cpu_millicores,
+            disk_mb=disk_mb,
             env=dict(env or {}),
             secrets=dict(secrets or {}),
+            secret_files=dict(secret_files or {}),
+            working_dir=working_dir,
+            prefer_warm=prefer_warm,
         )
         self._sandbox_id: str | None = None
         self._lease_token: str | None = None

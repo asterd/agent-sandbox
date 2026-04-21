@@ -18,6 +18,8 @@ use thiserror::Error;
 pub enum CompileError {
     #[error("apiVersion non supportata: {0}")]
     UnsupportedApiVersion(String),
+    #[error("kind non supportato: {0}")]
+    UnsupportedKind(String),
     #[error("runtime.preset e runtime.image non possono essere entrambi assenti")]
     MissingRuntime,
     #[error("runtime.preset=Custom richiede runtime.image esplicita")]
@@ -34,6 +36,9 @@ pub enum CompileError {
 pub fn compile(spec: SandboxSpec) -> Result<SandboxIR, CompileError> {
     if spec.api_version != API_VERSION_V1ALPHA1 {
         return Err(CompileError::UnsupportedApiVersion(spec.api_version));
+    }
+    if spec.kind != "Sandbox" {
+        return Err(CompileError::UnsupportedKind(spec.kind));
     }
 
     let body = spec.spec;
@@ -207,6 +212,16 @@ mod tests {
         assert!(matches!(
             compile(spec),
             Err(CompileError::UnsupportedApiVersion(_))
+        ));
+    }
+
+    #[test]
+    fn test_wrong_kind_is_error() {
+        let mut spec = minimal_spec("python");
+        spec.kind = "Pod".into();
+        assert!(matches!(
+            compile(spec),
+            Err(CompileError::UnsupportedKind(_))
         ));
     }
 
@@ -405,5 +420,30 @@ mod tests {
         );
         let ir = compile(spec).unwrap();
         assert_eq!(ir.working_dir, "/sandbox");
+    }
+
+    #[test]
+    fn test_unknown_top_level_field_is_error() {
+        let err = serde_yaml::from_str::<SandboxSpec>(
+            "apiVersion: sandbox.ai/v1alpha1\n\
+             kind: Sandbox\n\
+             metadata: {}\n\
+             unexpected: true\n\
+             spec:\n  runtime:\n    preset: python\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unexpected"));
+    }
+
+    #[test]
+    fn test_unknown_runtime_field_is_error() {
+        let err = serde_yaml::from_str::<SandboxSpec>(
+            "apiVersion: sandbox.ai/v1alpha1\n\
+             kind: Sandbox\n\
+             metadata: {}\n\
+             spec:\n  runtime:\n    preset: python\n    bogus: true\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("bogus"));
     }
 }

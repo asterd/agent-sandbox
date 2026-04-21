@@ -30,7 +30,11 @@ def test_to_spec_minimal_uses_preset_and_omits_network():
     assert "network" not in spec["spec"]
     assert "secrets" not in spec["spec"]
     assert spec["spec"]["ttlSeconds"] == 300
-    assert spec["spec"]["resources"] == {"memoryMb": 512, "cpuMillicores": 1000}
+    assert spec["spec"]["resources"] == {
+        "memoryMb": 512,
+        "cpuMillicores": 1000,
+        "diskMb": 1024,
+    }
 
 
 def test_to_spec_image_overrides_preset():
@@ -62,3 +66,24 @@ def test_to_spec_secrets_use_env_ref_not_raw_values():
     assert spec["spec"]["secrets"] == [
         {"name": "API_KEY", "valueFrom": {"envRef": "HOST_API_KEY"}}
     ]
+
+
+def test_to_spec_secret_files_use_file_source():
+    spec = SandboxConfig(
+        runtime="python", secret_files={"SERVICE_TOKEN": "/tmp/token.txt"}
+    ).to_spec()
+    assert spec["spec"]["secrets"] == [
+        {"name": "SERVICE_TOKEN", "valueFrom": {"file": "/tmp/token.txt"}}
+    ]
+
+
+def test_to_spec_supports_working_dir_disk_and_prefer_warm():
+    spec = SandboxConfig(
+        runtime="python",
+        working_dir="/sandbox",
+        disk_mb=2048,
+        prefer_warm=True,
+    ).to_spec()
+    assert spec["spec"]["runtime"]["workingDir"] == "/sandbox"
+    assert spec["spec"]["resources"]["diskMb"] == 2048
+    assert spec["spec"]["scheduling"] == {"preferWarm": True}

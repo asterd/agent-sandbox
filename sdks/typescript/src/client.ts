@@ -42,8 +42,12 @@ export class Sandbox {
       egress: [...(options.egress ?? [])],
       memoryMb: options.memoryMb ?? 512,
       cpuMillicores: options.cpuMillicores ?? 1000,
+      diskMb: options.diskMb ?? 1024,
       env: { ...(options.env ?? {}) },
       secrets: { ...(options.secrets ?? {}) },
+      secretFiles: { ...(options.secretFiles ?? {}) },
+      workingDir: options.workingDir,
+      preferWarm: options.preferWarm ?? false,
       daemonUrl: options.daemonUrl ?? DEFAULT_DAEMON_URL,
       fetch: options.fetch,
     };
@@ -169,12 +173,16 @@ export class Sandbox {
     if (Object.keys(this.#config.env).length > 0) {
       runtime.env = this.#config.env;
     }
+    if (this.#config.workingDir) {
+      runtime.workingDir = this.#config.workingDir;
+    }
 
     const specBody: Record<string, unknown> = {
       runtime,
       resources: {
         memoryMb: this.#config.memoryMb,
         cpuMillicores: this.#config.cpuMillicores,
+        diskMb: this.#config.diskMb,
       },
       ttlSeconds: this.#config.ttl,
     };
@@ -192,6 +200,20 @@ export class Sandbox {
           valueFrom: { envRef: hostVar },
         }),
       );
+    }
+    if (Object.keys(this.#config.secretFiles).length > 0) {
+      const secretFiles = Object.entries(this.#config.secretFiles).map(
+        ([name, path]) => ({
+          name,
+          valueFrom: { file: path },
+        }),
+      );
+      specBody.secrets = Array.isArray(specBody.secrets)
+        ? [...(specBody.secrets as object[]), ...secretFiles]
+        : secretFiles;
+    }
+    if (this.#config.preferWarm) {
+      specBody.scheduling = { preferWarm: true };
     }
 
     return {

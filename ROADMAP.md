@@ -27,11 +27,11 @@ Backend Adapter
 ```python
 from agentsandbox import Sandbox
 
-async with Sandbox(runtime="python", ttl=900, egress=["pypi.org"]) as sb:
+async with Sandbox(runtime="python", ttl=900) as sb:
     result = await sb.exec("pip install requests && python -c 'import requests; print(requests.__version__)'")
     print(result.stdout)
 ```
-Questo deve funzionare, essere stabile e completare in < 3 secondi dopo il primo pull.
+Questo deve funzionare ed essere stabile. Il filtering egress reale viene evoluto separatamente nel percorso `ROADMAP_STABLE.md` FASE C (proxy L4).
 
 ---
 

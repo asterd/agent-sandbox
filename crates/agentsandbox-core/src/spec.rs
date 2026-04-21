@@ -12,7 +12,7 @@ pub const API_VERSION_V1ALPHA1: &str = "sandbox.ai/v1alpha1";
 
 /// Root document: a sandbox specification in YAML or JSON form.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SandboxSpec {
     /// API version string, e.g. `"sandbox.ai/v1alpha1"`.
     pub api_version: String,
@@ -24,13 +24,14 @@ pub struct SandboxSpec {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Metadata {
     pub name: Option<String>,
     pub labels: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SandboxSpecBody {
     pub runtime: RuntimeSpec,
     pub resources: Option<ResourceSpec>,
@@ -41,7 +42,7 @@ pub struct SandboxSpecBody {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeSpec {
     /// Explicit docker image. When set, overrides `preset`.
     pub image: Option<String>,
@@ -67,7 +68,7 @@ pub enum RuntimePreset {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResourceSpec {
     /// CPU budget in millicores. Default: 1000 (= 1 CPU).
     pub cpu_millicores: Option<u32>,
@@ -78,12 +79,13 @@ pub struct ResourceSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkSpec {
     pub egress: EgressPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EgressPolicy {
     /// Allowed egress hostnames (no wildcards, no IPs).
     #[serde(default)]
@@ -98,7 +100,7 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SecretRef {
     /// Guest-side env var name the secret is bound to.
     pub name: String,
@@ -144,7 +146,7 @@ impl SecretSource {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SchedulingSpec {
     /// Prefer reusing a warm sandbox pool. Ignored in v1alpha1.
     #[serde(default)]

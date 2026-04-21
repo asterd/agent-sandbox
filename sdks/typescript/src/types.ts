@@ -44,8 +44,12 @@ export interface SandboxConfig {
   egress: string[];
   memoryMb: number;
   cpuMillicores: number;
+  diskMb: number;
   env: Record<string, string>;
   secrets: Record<string, string>;
+  secretFiles: Record<string, string>;
+  workingDir?: string;
+  preferWarm: boolean;
   daemonUrl: string;
   fetch?: typeof fetch;
 }

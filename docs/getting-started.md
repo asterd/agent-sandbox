@@ -113,3 +113,4 @@ Useful references:
 - `exec` and `destroy` require the `X-Lease-Token` returned by `POST /v1/sandboxes`
 - a process returning exit code `1` is still a successful API call; the failure is in the guest process, not in the daemon
 - `network.egress` is strict: unsupported allowlists fail sandbox creation instead of silently opening the network
+- today `network.egress` still depends on guest-side `iptables`; the planned stable replacement is the proxy L4 path in `ROADMAP_STABLE.md` FASE C

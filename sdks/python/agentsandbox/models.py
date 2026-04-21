@@ -61,8 +61,12 @@ class SandboxConfig:
     egress: list[str] = field(default_factory=list)
     memory_mb: int = 512
     cpu_millicores: int = 1000
+    disk_mb: int = 1024
     env: dict[str, str] = field(default_factory=dict)
     secrets: dict[str, str] = field(default_factory=dict)
+    secret_files: dict[str, str] = field(default_factory=dict)
+    working_dir: str | None = None
+    prefer_warm: bool = False
 
     API_VERSION: ClassVar[str] = "sandbox.ai/v1alpha1"
     KIND: ClassVar[str] = "Sandbox"
@@ -83,12 +87,15 @@ class SandboxConfig:
             runtime["preset"] = self.runtime
         if self.env:
             runtime["env"] = self.env
+        if self.working_dir:
+            runtime["workingDir"] = self.working_dir
 
         spec_body: dict[str, Any] = {
             "runtime": runtime,
             "resources": {
                 "memoryMb": self.memory_mb,
                 "cpuMillicores": self.cpu_millicores,
+                "diskMb": self.disk_mb,
             },
             "ttlSeconds": self.ttl,
         }
@@ -106,6 +113,13 @@ class SandboxConfig:
                 {"name": name, "valueFrom": {"envRef": host_var}}
                 for name, host_var in self.secrets.items()
             ]
+        if self.secret_files:
+            spec_body.setdefault("secrets", []).extend(
+                {"name": name, "valueFrom": {"file": path}}
+                for name, path in self.secret_files.items()
+            )
+        if self.prefer_warm:
+            spec_body["scheduling"] = {"preferWarm": True}
 
         return {
             "apiVersion": self.API_VERSION,

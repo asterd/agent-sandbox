@@ -7,7 +7,7 @@ Examples in this directory are meant to be copied, modified, and run against a l
 | Example | SDK | What it demonstrates | Network policy |
 | --- | --- | --- | --- |
 | [python-code-review-agent](python-code-review-agent/README.md) | Python | Claude reviews a Python file, then the fixed code is executed inside a sandbox | No guest egress |
-| [ts-dependency-auditor](ts-dependency-auditor/README.md) | TypeScript | Installs dependencies and runs `npm audit` inside a sandbox, then asks Claude for a short summary | Allowlist for npm registries |
+| [ts-dependency-auditor](ts-dependency-auditor/README.md) | TypeScript | Installs dependencies and runs `npm audit` inside a sandbox, then asks Claude for a short summary | Open egress in v0.1.0 alpha |
 
 ## Common prerequisites
 

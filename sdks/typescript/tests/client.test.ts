@@ -160,6 +160,54 @@ describe("Sandbox.create + destroy", () => {
     ]);
   });
 
+  it("converte secretFiles in valueFrom.file", async () => {
+    let body: unknown;
+    const fetchImpl = mockFetch(async (url, init) => {
+      if (init.method === "POST" && url === `${DAEMON}/v1/sandboxes`) {
+        body = JSON.parse(init.body as string);
+        return json(201, createBody);
+      }
+      return new Response(null, { status: 204 });
+    });
+    const sb = await Sandbox.create({
+      runtime: "python",
+      secretFiles: { SERVICE_TOKEN: "/tmp/token.txt" },
+      fetch: fetchImpl,
+    });
+    await sb.destroy();
+    const spec = (body as { spec: { secrets: unknown } }).spec;
+    expect(spec.secrets).toEqual([
+      { name: "SERVICE_TOKEN", valueFrom: { file: "/tmp/token.txt" } },
+    ]);
+  });
+
+  it("include workingDir, diskMb e scheduling.preferWarm quando richiesti", async () => {
+    let body: unknown;
+    const fetchImpl = mockFetch(async (url, init) => {
+      if (init.method === "POST" && url === `${DAEMON}/v1/sandboxes`) {
+        body = JSON.parse(init.body as string);
+        return json(201, createBody);
+      }
+      return new Response(null, { status: 204 });
+    });
+    const sb = await Sandbox.create({
+      runtime: "python",
+      workingDir: "/sandbox",
+      diskMb: 2048,
+      preferWarm: true,
+      fetch: fetchImpl,
+    });
+    await sb.destroy();
+    const spec = (body as { spec: Record<string, unknown> }).spec;
+    expect((spec.runtime as Record<string, unknown>).workingDir).toBe("/sandbox");
+    expect(spec.resources).toEqual({
+      memoryMb: 512,
+      cpuMillicores: 1000,
+      diskMb: 2048,
+    });
+    expect(spec.scheduling).toEqual({ preferWarm: true });
+  });
+
   it("usa image invece di preset quando fornita", async () => {
     let body: unknown;
     const fetchImpl = mockFetch(async (url, init) => {

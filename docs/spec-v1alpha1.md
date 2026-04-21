@@ -178,3 +178,4 @@ spec:
 - wildcard hostnames like `*.example.com` are rejected
 - direct IPs in `egress.allow` are rejected
 - Docker enforcement uses `iptables` inside the guest; if the runtime image cannot apply the policy, sandbox creation fails instead of silently opening egress
+- the planned stable replacement is the proxy L4 design documented in `ROADMAP_STABLE.md` FASE C

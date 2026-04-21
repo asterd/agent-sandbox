@@ -130,7 +130,6 @@ async function auditDependencies(packageJsonPath: string): Promise<{
     runtime: "node",
     ttl: 180,
     memoryMb: 512,
-    egress: ["registry.npmjs.org", "registry.yarnpkg.com"],
   });
 
   await writeFileToSandbox(sandbox, "/workspace/package.json", packageJson);

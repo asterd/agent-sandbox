@@ -4,19 +4,20 @@
 //! its result into a JSON body and lets the [`ApiError`] extractor do the
 //! status-code mapping; handlers never call `StatusCode` directly.
 
-use agentsandbox_core::{compile, SandboxStatus};
+use agentsandbox_core::{compile, AdapterError, SandboxStatus};
 use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap},
     Json,
 };
+use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::audit::{self, Event};
 use crate::error::ApiError;
 use crate::state::SharedState;
-use crate::store;
+use crate::store::{self, SandboxRow};
 
 const LEASE_HEADER: &str = "X-Lease-Token";
 
@@ -122,6 +123,62 @@ pub struct InspectResponse {
     pub error_message: Option<String>,
 }
 
+fn is_backend_observed_status(status: &str) -> bool {
+    matches!(status, "creating" | "running")
+}
+
+fn status_from_adapter(status: SandboxStatus) -> String {
+    match status {
+        SandboxStatus::Creating => "creating".into(),
+        SandboxStatus::Running => "running".into(),
+        SandboxStatus::Stopped => "stopped".into(),
+        SandboxStatus::Error(message) => {
+            tracing::warn!(error = %message, "backend reported error state");
+            "error".into()
+        }
+    }
+}
+
+async fn refresh_runtime_status(
+    state: &SharedState,
+    row: SandboxRow,
+) -> Result<SandboxRow, ApiError> {
+    if !is_backend_observed_status(&row.status) {
+        return Ok(row);
+    }
+
+    match state.adapter.inspect(&row.id).await {
+        Ok(info) => {
+            let observed_status = status_from_adapter(info.status);
+            if observed_status != row.status {
+                store::set_status(
+                    &state.db,
+                    &row.id,
+                    match observed_status.as_str() {
+                        "creating" => SandboxStatus::Creating,
+                        "running" => SandboxStatus::Running,
+                        "stopped" => SandboxStatus::Stopped,
+                        _ => SandboxStatus::Error("backend reported failure".into()),
+                    },
+                )
+                .await?;
+            }
+            Ok(SandboxRow {
+                status: observed_status,
+                ..row
+            })
+        }
+        Err(AdapterError::NotFound(_)) => {
+            store::set_status(&state.db, &row.id, SandboxStatus::Stopped).await?;
+            Ok(SandboxRow {
+                status: "stopped".into(),
+                ..row
+            })
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
 pub async fn inspect_sandbox(
     State(state): State<SharedState>,
     Path(id): Path<String>,
@@ -129,6 +186,7 @@ pub async fn inspect_sandbox(
     let row = store::get_sandbox(&state.db, &id)
         .await?
         .ok_or_else(|| ApiError::not_found(&id))?;
+    let row = refresh_runtime_status(&state, row).await?;
 
     Ok(Json(InspectResponse {
         sandbox_id: row.id,
@@ -163,14 +221,28 @@ pub async fn list_sandboxes(
     let rows = store::list_active(&state.db, limit, offset).await?;
     let items: Vec<_> = rows
         .into_iter()
-        .map(|r| InspectResponse {
-            sandbox_id: r.id,
-            status: r.status,
-            backend: r.backend,
-            created_at: r.created_at.to_rfc3339(),
-            expires_at: r.expires_at.to_rfc3339(),
-            error_message: r.error_message,
+        .map(|row| async {
+            match refresh_runtime_status(&state, row).await {
+                Ok(fresh) if is_backend_observed_status(&fresh.status) => Some(InspectResponse {
+                    sandbox_id: fresh.id,
+                    status: fresh.status,
+                    backend: fresh.backend,
+                    created_at: fresh.created_at.to_rfc3339(),
+                    expires_at: fresh.expires_at.to_rfc3339(),
+                    error_message: fresh.error_message,
+                }),
+                Ok(_) => None,
+                Err(err) => {
+                    tracing::warn!(error = %err, "list_sandboxes could not refresh backend state");
+                    None
+                }
+            }
         })
+        .collect::<FuturesUnordered<_>>()
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .flatten()
         .collect();
     Ok(Json(json!({ "items": items, "limit": limit, "offset": offset })))
 }
@@ -262,4 +334,126 @@ pub async fn destroy_sandbox(
     audit::record(&state.db, &id, Event::Destroyed, None).await;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use agentsandbox_core::{ExecResult, SandboxAdapter, SandboxInfo};
+    use async_trait::async_trait;
+    use chrono::{Duration, Utc};
+    use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
+    use std::str::FromStr;
+
+    use crate::state::AppState;
+
+    enum InspectBehavior {
+        Status(SandboxStatus),
+        NotFound,
+    }
+
+    struct MockAdapter {
+        inspect_behavior: InspectBehavior,
+    }
+
+    #[async_trait]
+    impl SandboxAdapter for MockAdapter {
+        async fn create(&self, _ir: &agentsandbox_core::SandboxIR) -> Result<String, AdapterError> {
+            Err(AdapterError::Internal("unused".into()))
+        }
+
+        async fn exec(&self, _sandbox_id: &str, _command: &str) -> Result<ExecResult, AdapterError> {
+            Err(AdapterError::Internal("unused".into()))
+        }
+
+        async fn inspect(&self, _sandbox_id: &str) -> Result<SandboxInfo, AdapterError> {
+            match &self.inspect_behavior {
+                InspectBehavior::Status(status) => Ok(SandboxInfo {
+                    sandbox_id: "test".into(),
+                    status: status.clone(),
+                    created_at: Utc::now(),
+                    expires_at: Utc::now(),
+                }),
+                InspectBehavior::NotFound => Err(AdapterError::NotFound("missing".into())),
+            }
+        }
+
+        async fn destroy(&self, _sandbox_id: &str) -> Result<(), AdapterError> {
+            Ok(())
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), AdapterError> {
+            Ok(())
+        }
+    }
+
+    async fn test_db() -> SqlitePool {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    async fn insert_running_row(pool: &SqlitePool, id: &str) {
+        let created_at = Utc::now();
+        let expires_at = created_at + Duration::seconds(60);
+        sqlx::query(
+            "INSERT INTO sandboxes \
+             (id, lease_token, status, backend, spec_json, ir_json, created_at, expires_at) \
+             VALUES (?1, ?2, 'running', 'mock', '{}', '{}', ?3, ?4)",
+        )
+        .bind(id)
+        .bind("lease")
+        .bind(created_at.to_rfc3339())
+        .bind(expires_at.to_rfc3339())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn refresh_runtime_status_updates_row_when_backend_stopped() {
+        let db = test_db().await;
+        insert_running_row(&db, "sb-1").await;
+        let row = store::get_sandbox(&db, "sb-1").await.unwrap().unwrap();
+        let state = Arc::new(AppState {
+            db: db.clone(),
+            adapter: Arc::new(MockAdapter {
+                inspect_behavior: InspectBehavior::Status(SandboxStatus::Stopped),
+            }),
+        });
+
+        let fresh = refresh_runtime_status(&state, row).await.unwrap();
+        assert_eq!(fresh.status, "stopped");
+
+        let persisted = store::get_sandbox(&db, "sb-1").await.unwrap().unwrap();
+        assert_eq!(persisted.status, "stopped");
+    }
+
+    #[tokio::test]
+    async fn refresh_runtime_status_marks_missing_backend_as_stopped() {
+        let db = test_db().await;
+        insert_running_row(&db, "sb-2").await;
+        let row = store::get_sandbox(&db, "sb-2").await.unwrap().unwrap();
+        let state = Arc::new(AppState {
+            db: db.clone(),
+            adapter: Arc::new(MockAdapter {
+                inspect_behavior: InspectBehavior::NotFound,
+            }),
+        });
+
+        let fresh = refresh_runtime_status(&state, row).await.unwrap();
+        assert_eq!(fresh.status, "stopped");
+
+        let persisted = store::get_sandbox(&db, "sb-2").await.unwrap().unwrap();
+        assert_eq!(persisted.status, "stopped");
+    }
 }
