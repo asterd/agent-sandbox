@@ -22,6 +22,7 @@ use crate::state::SharedState;
 use crate::store::{self, SandboxRow};
 
 const LEASE_HEADER: &str = "X-Lease-Token";
+const EXTENSIONS_HEADER: &str = "X-AgentSandbox-Extensions";
 
 // ---------- /v1/health ----------
 
@@ -130,16 +131,41 @@ fn parse_spec_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, ApiError> 
     }
 }
 
+fn parse_hidden_extensions(headers: &HeaderMap) -> Result<Option<Value>, ApiError> {
+    let Some(raw) = headers.get(EXTENSIONS_HEADER) else {
+        return Ok(None);
+    };
+
+    let raw = raw.to_str().map_err(|_| {
+        ApiError::spec_invalid(format!("{EXTENSIONS_HEADER} deve essere testo UTF-8 valido"))
+    })?;
+    let value: Value = serde_json::from_str(raw).map_err(|e| {
+        ApiError::spec_invalid(format!(
+            "{EXTENSIONS_HEADER} deve contenere un JSON object valido: {e}"
+        ))
+    })?;
+
+    if !value.is_object() {
+        return Err(ApiError::spec_invalid(format!(
+            "{EXTENSIONS_HEADER} deve contenere un JSON object"
+        )));
+    }
+
+    Ok(Some(value))
+}
+
 pub async fn create_sandbox(
     State(state): State<SharedState>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<(axum::http::StatusCode, Json<CreateResponse>), ApiError> {
     let raw_spec = parse_spec_body(&headers, &body)?;
+    let hidden_extensions = parse_hidden_extensions(&headers)?;
     // Keep the original submission for audit — reserialise as JSON so the
     // DB column format stays stable even when clients sent YAML.
     let spec_json = serde_json::to_string(&raw_spec)?;
-    let ir = compile_value(raw_spec)?;
+    let mut ir = compile_value(raw_spec)?;
+    ir.extensions = hidden_extensions;
 
     let lease_token = uuid::Uuid::new_v4().to_string();
     let (backend_id, backend) = state
@@ -529,11 +555,14 @@ mod tests {
     struct MockBackend {
         inspect_behavior: InspectBehavior,
         destroyed: Arc<Mutex<Vec<String>>>,
+        last_extensions: Arc<Mutex<Option<Value>>>,
+        allow_extensions: bool,
     }
 
     #[async_trait]
     impl SandboxBackend for MockBackend {
         async fn create(&self, ir: &SandboxIR) -> Result<String, BackendError> {
+            *self.last_extensions.lock().unwrap() = ir.extensions.clone();
             Ok(format!("handle-{}", ir.id))
         }
 
@@ -567,11 +596,23 @@ mod tests {
         async fn health_check(&self) -> Result<(), BackendError> {
             Ok(())
         }
+
+        async fn can_satisfy(&self, ir: &SandboxIR) -> Result<(), BackendError> {
+            *self.last_extensions.lock().unwrap() = ir.extensions.clone();
+            if ir.extensions.is_some() && !self.allow_extensions {
+                return Err(BackendError::NotSupported(
+                    "questo backend non supporta extensions".into(),
+                ));
+            }
+            Ok(())
+        }
     }
 
     struct MockFactory {
         inspect_behavior: InspectBehavior,
         destroyed: Arc<Mutex<Vec<String>>>,
+        last_extensions: Arc<Mutex<Option<Value>>>,
+        allow_extensions: bool,
     }
 
     impl BackendFactory for MockFactory {
@@ -585,7 +626,7 @@ mod tests {
                     isolation_level: IsolationLevel::Process,
                     ..BackendCapabilities::default()
                 },
-                extensions_schema: None,
+                extensions_schema: self.allow_extensions.then_some("{}"),
             }
         }
 
@@ -599,6 +640,8 @@ mod tests {
                     InspectBehavior::NotFound => InspectBehavior::NotFound,
                 },
                 destroyed: self.destroyed.clone(),
+                last_extensions: self.last_extensions.clone(),
+                allow_extensions: self.allow_extensions,
             }))
         }
     }
@@ -615,12 +658,15 @@ mod tests {
     async fn test_state(
         db: SqlitePool,
         inspect_behavior: InspectBehavior,
-    ) -> (Arc<AppState>, Arc<Mutex<Vec<String>>>) {
+    ) -> (Arc<AppState>, Arc<Mutex<Vec<String>>>, Arc<Mutex<Option<Value>>>) {
         let mut registry = BackendRegistry::new();
         let destroyed = Arc::new(Mutex::new(Vec::new()));
+        let last_extensions = Arc::new(Mutex::new(None));
         let factory = MockFactory {
             inspect_behavior,
             destroyed: destroyed.clone(),
+            last_extensions: last_extensions.clone(),
+            allow_extensions: false,
         };
         registry.register(&factory);
         registry.initialize(&factory, &HashMap::new()).await;
@@ -630,6 +676,32 @@ mod tests {
                 registry: Arc::new(registry),
             }),
             destroyed,
+            last_extensions,
+        )
+    }
+
+    async fn test_state_with_extensions(
+        db: SqlitePool,
+        inspect_behavior: InspectBehavior,
+    ) -> (Arc<AppState>, Arc<Mutex<Vec<String>>>, Arc<Mutex<Option<Value>>>) {
+        let mut registry = BackendRegistry::new();
+        let destroyed = Arc::new(Mutex::new(Vec::new()));
+        let last_extensions = Arc::new(Mutex::new(None));
+        let factory = MockFactory {
+            inspect_behavior,
+            destroyed: destroyed.clone(),
+            last_extensions: last_extensions.clone(),
+            allow_extensions: true,
+        };
+        registry.register(&factory);
+        registry.initialize(&factory, &HashMap::new()).await;
+        (
+            Arc::new(AppState {
+                db,
+                registry: Arc::new(registry),
+            }),
+            destroyed,
+            last_extensions,
         )
     }
 
@@ -656,7 +728,7 @@ mod tests {
         let db = test_db().await;
         insert_running_row(&db, "sb-1").await;
         let row = store::get_sandbox(&db, "sb-1").await.unwrap().unwrap();
-        let (state, _) =
+        let (state, _, _) =
             test_state(db.clone(), InspectBehavior::Status(SandboxState::Stopped)).await;
 
         let fresh = refresh_runtime_status(&state, row).await.unwrap();
@@ -671,7 +743,7 @@ mod tests {
         let db = test_db().await;
         insert_running_row(&db, "sb-2").await;
         let row = store::get_sandbox(&db, "sb-2").await.unwrap().unwrap();
-        let (state, _) = test_state(db.clone(), InspectBehavior::NotFound).await;
+        let (state, _, _) = test_state(db.clone(), InspectBehavior::NotFound).await;
 
         let fresh = refresh_runtime_status(&state, row).await.unwrap();
         assert_eq!(fresh.status, "stopped");
@@ -683,7 +755,7 @@ mod tests {
     #[tokio::test]
     async fn create_sandbox_accepts_v1_json() {
         let db = test_db().await;
-        let (state, _) = test_state(db, InspectBehavior::Status(SandboxState::Running)).await;
+        let (state, _, _) = test_state(db, InspectBehavior::Status(SandboxState::Running)).await;
         let app = router::build(state);
 
         let response = app
@@ -706,7 +778,7 @@ mod tests {
     #[tokio::test]
     async fn create_sandbox_accepts_v1_yaml() {
         let db = test_db().await;
-        let (state, _) = test_state(db, InspectBehavior::Status(SandboxState::Running)).await;
+        let (state, _, _) = test_state(db, InspectBehavior::Status(SandboxState::Running)).await;
         let app = router::build(state);
 
         let response = app
@@ -729,7 +801,7 @@ mod tests {
     #[tokio::test]
     async fn create_sandbox_returns_structured_schema_errors() {
         let db = test_db().await;
-        let (state, _) = test_state(db, InspectBehavior::Status(SandboxState::Running)).await;
+        let (state, _, _) = test_state(db, InspectBehavior::Status(SandboxState::Running)).await;
         let app = router::build(state);
 
         let response = app
@@ -782,7 +854,7 @@ mod tests {
         .await
         .unwrap();
 
-        let (state, destroyed) = test_state(db.clone(), InspectBehavior::Status(SandboxState::Running)).await;
+        let (state, destroyed, _) = test_state(db.clone(), InspectBehavior::Status(SandboxState::Running)).await;
         let app = router::build(state);
 
         let response = app
@@ -804,5 +876,62 @@ mod tests {
         let destroyed = destroyed.lock().unwrap().clone();
         assert_eq!(destroyed.len(), 1);
         assert!(destroyed[0].starts_with("handle-"));
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_accepts_hidden_extensions_header() {
+        let db = test_db().await;
+        let (state, _, last_extensions) =
+            test_state_with_extensions(db, InspectBehavior::Status(SandboxState::Running)).await;
+        let app = router::build(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(
+                        EXTENSIONS_HEADER,
+                        r#"{"gvisor":{"network":"host"}}"#,
+                    )
+                    .body(Body::from(
+                        r#"{"apiVersion":"sandbox.ai/v1","kind":"Sandbox","metadata":{},"spec":{"runtime":{"preset":"python"}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+        let captured = last_extensions.lock().unwrap().clone();
+        assert_eq!(captured, Some(serde_json::json!({"gvisor":{"network":"host"}})));
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_rejects_non_object_hidden_extensions_header() {
+        let db = test_db().await;
+        let (state, _, _) = test_state(db, InspectBehavior::Status(SandboxState::Running)).await;
+        let app = router::build(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(EXTENSIONS_HEADER, r#"["not-an-object"]"#)
+                    .body(Body::from(
+                        r#"{"apiVersion":"sandbox.ai/v1","kind":"Sandbox","metadata":{},"spec":{"runtime":{"preset":"python"}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 }

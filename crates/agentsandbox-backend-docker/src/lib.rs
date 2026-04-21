@@ -32,11 +32,19 @@ const ID_LABEL: &str = "ai.sandbox.id";
 
 pub struct DockerBackend {
     client: Docker,
+    runtime: Option<String>,
 }
 
 impl DockerBackend {
     pub fn with_client(client: Docker) -> Self {
-        Self { client }
+        Self {
+            client,
+            runtime: None,
+        }
+    }
+
+    pub fn with_runtime(client: Docker, runtime: Option<String>) -> Self {
+        Self { client, runtime }
     }
 
     fn container_name(sandbox_id: &str) -> String {
@@ -108,7 +116,9 @@ impl DockerBackend {
     ) -> Result<String, BackendError> {
         match self.client.create_exec(handle, options.clone()).await {
             Ok(exec) => Ok(exec.id),
-            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => {
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => {
                 let Some(legacy_name) = Self::legacy_container_name(handle) else {
                     return Err(BackendError::NotFound(handle.to_string()));
                 };
@@ -132,7 +142,9 @@ impl DockerBackend {
             .await
         {
             Ok(info) => Ok(info),
-            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => {
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => {
                 let Some(legacy_name) = Self::legacy_container_name(handle) else {
                     return Err(BackendError::NotFound(handle.to_string()));
                 };
@@ -158,7 +170,9 @@ impl DockerBackend {
             .await
         {
             Ok(()) => Ok(()),
-            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => {
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => {
                 let Some(legacy_name) = Self::legacy_container_name(handle) else {
                     return Ok(());
                 };
@@ -238,6 +252,7 @@ impl SandboxBackend for DockerBackend {
             memory: Some(i64::from(ir.memory_mb) * 1024 * 1024),
             nano_cpus: Some(i64::from(ir.cpu_millicores) * 1_000_000),
             network_mode: Some(Self::network_mode_for(ir).to_string()),
+            runtime: self.runtime.clone(),
             auto_remove: Some(false),
             cap_add: Self::should_apply_egress_rules(ir).then(|| vec!["NET_ADMIN".to_string()]),
             ..Default::default()
@@ -344,7 +359,11 @@ impl SandboxBackend for DockerBackend {
             .create_exec_with_fallback(
                 handle,
                 CreateExecOptions {
-                    cmd: Some(vec!["sh".to_string(), "-c".to_string(), command.to_string()]),
+                    cmd: Some(vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        command.to_string(),
+                    ]),
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
                     ..Default::default()

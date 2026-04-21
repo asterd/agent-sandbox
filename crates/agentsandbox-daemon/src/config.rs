@@ -34,12 +34,20 @@ pub struct BackendsSection {
     #[serde(default)]
     pub docker: DockerBackendSection,
     #[serde(default)]
+    pub gvisor: GVisorBackendSection,
+    #[serde(default)]
     pub podman: PodmanBackendSection,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct DockerBackendSection {
     pub socket: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct GVisorBackendSection {
+    pub socket: Option<String>,
+    pub runtime: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -67,6 +75,16 @@ impl BackendsSection {
                 let mut config = std::collections::HashMap::new();
                 if let Some(socket) = &self.podman.socket {
                     config.insert("socket".into(), socket.clone());
+                }
+                config
+            }
+            "gvisor" => {
+                let mut config = std::collections::HashMap::new();
+                if let Some(socket) = &self.gvisor.socket {
+                    config.insert("socket".into(), socket.clone());
+                }
+                if let Some(runtime) = &self.gvisor.runtime {
+                    config.insert("runtime".into(), runtime.clone());
                 }
                 config
             }
@@ -131,6 +149,12 @@ fn apply_env_overrides(cfg: &mut DaemonConfig) -> anyhow::Result<()> {
     }
     if let Ok(socket) = std::env::var("AS_BACKENDS_DOCKER_SOCKET") {
         cfg.backends.docker.socket = Some(socket);
+    }
+    if let Ok(socket) = std::env::var("AS_BACKENDS_GVISOR_SOCKET") {
+        cfg.backends.gvisor.socket = Some(socket);
+    }
+    if let Ok(runtime) = std::env::var("AS_BACKENDS_GVISOR_RUNTIME") {
+        cfg.backends.gvisor.runtime = Some(runtime);
     }
     if let Ok(socket) = std::env::var("AS_BACKENDS_PODMAN_SOCKET") {
         cfg.backends.podman.socket = Some(socket);
@@ -216,10 +240,14 @@ url = "sqlite://dev.db"
 mode = "api_key"
 
 [backends]
-enabled = ["docker", "podman"]
+enabled = ["docker", "gvisor", "podman"]
 
 [backends.docker]
 socket = "/tmp/docker.sock"
+
+[backends.gvisor]
+socket = "/tmp/gvisor.sock"
+runtime = "runsc-kvm"
 
 [backends.podman]
 socket = "/tmp/podman.sock"
@@ -234,6 +262,11 @@ socket = "/tmp/podman.sock"
             cfg.backends.docker.socket.as_deref(),
             Some("/tmp/docker.sock")
         );
+        assert_eq!(
+            cfg.backends.gvisor.socket.as_deref(),
+            Some("/tmp/gvisor.sock")
+        );
+        assert_eq!(cfg.backends.gvisor.runtime.as_deref(), Some("runsc-kvm"));
         assert_eq!(
             cfg.backends.podman.socket.as_deref(),
             Some("/tmp/podman.sock")
@@ -257,7 +290,10 @@ database:
 auth:
   mode: single_user
 backends:
-  enabled: [docker, podman]
+  enabled: [docker, gvisor, podman]
+  gvisor:
+    socket: /tmp/gvisor.sock
+    runtime: runsc
   podman:
     socket: /tmp/podman.sock
 "#,
@@ -266,6 +302,11 @@ backends:
         let cfg = load_config(&path).unwrap();
         assert_eq!(cfg.daemon.port, 7848);
         assert_eq!(cfg.database.url, "sqlite://yaml.db");
+        assert_eq!(
+            cfg.backends.gvisor.socket.as_deref(),
+            Some("/tmp/gvisor.sock")
+        );
+        assert_eq!(cfg.backends.gvisor.runtime.as_deref(), Some("runsc"));
         assert_eq!(
             cfg.backends.podman.socket.as_deref(),
             Some("/tmp/podman.sock")
@@ -296,13 +337,20 @@ enabled = ["docker"]
         );
         let _port = EnvGuard::set("AS_DAEMON_PORT", "9999");
         let _db = EnvGuard::set("AS_DATABASE_URL", "sqlite://env.db");
-        let _enabled = EnvGuard::set("AS_BACKENDS_ENABLED", "docker,podman");
+        let _enabled = EnvGuard::set("AS_BACKENDS_ENABLED", "docker,gvisor,podman");
+        let _gvisor_socket = EnvGuard::set("AS_BACKENDS_GVISOR_SOCKET", "/env/gvisor.sock");
+        let _gvisor_runtime = EnvGuard::set("AS_BACKENDS_GVISOR_RUNTIME", "runsc-debug");
         let _podman_socket = EnvGuard::set("AS_BACKENDS_PODMAN_SOCKET", "/env/podman.sock");
 
         let cfg = load_config(&path).unwrap();
         assert_eq!(cfg.daemon.port, 9999);
         assert_eq!(cfg.database.url, "sqlite://env.db");
-        assert_eq!(cfg.backends.enabled, vec!["docker", "podman"]);
+        assert_eq!(cfg.backends.enabled, vec!["docker", "gvisor", "podman"]);
+        assert_eq!(
+            cfg.backends.gvisor.socket.as_deref(),
+            Some("/env/gvisor.sock")
+        );
+        assert_eq!(cfg.backends.gvisor.runtime.as_deref(), Some("runsc-debug"));
         assert_eq!(
             cfg.backends.podman.socket.as_deref(),
             Some("/env/podman.sock")
@@ -312,9 +360,13 @@ enabled = ["docker"]
     #[test]
     fn config_for_returns_backend_specific_socket() {
         let backends = BackendsSection {
-            enabled: vec!["docker".into(), "podman".into()],
+            enabled: vec!["docker".into(), "gvisor".into(), "podman".into()],
             docker: DockerBackendSection {
                 socket: Some("/docker.sock".into()),
+            },
+            gvisor: GVisorBackendSection {
+                socket: Some("/gvisor.sock".into()),
+                runtime: Some("runsc".into()),
             },
             podman: PodmanBackendSection {
                 socket: Some("/podman.sock".into()),
@@ -327,6 +379,20 @@ enabled = ["docker"]
                 .get("socket")
                 .map(String::as_str),
             Some("/docker.sock")
+        );
+        assert_eq!(
+            backends
+                .config_for("gvisor")
+                .get("socket")
+                .map(String::as_str),
+            Some("/gvisor.sock")
+        );
+        assert_eq!(
+            backends
+                .config_for("gvisor")
+                .get("runtime")
+                .map(String::as_str),
+            Some("runsc")
         );
         assert_eq!(
             backends

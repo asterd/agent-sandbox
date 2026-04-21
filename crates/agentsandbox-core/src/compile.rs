@@ -367,6 +367,22 @@ spec:
     }
 
     #[test]
+    fn compile_any_preserves_gvisor_backend_hint() {
+        let raw = r#"
+apiVersion: sandbox.ai/v1
+kind: Sandbox
+metadata: {}
+spec:
+  runtime:
+    preset: python
+  scheduling:
+    backend: gvisor
+"#;
+        let ir = compile_any(raw).unwrap();
+        assert_eq!(ir.backend_hint.as_deref(), Some("gvisor"));
+    }
+
+    #[test]
     fn schema_validation_collects_field_errors() {
         let raw = serde_json::json!({
             "apiVersion": "sandbox.ai/v1",

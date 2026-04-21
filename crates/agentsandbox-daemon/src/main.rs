@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use agentsandbox_backend_docker::DockerBackendFactory;
+use agentsandbox_backend_gvisor::GVisorBackendFactory;
 use agentsandbox_backend_podman::PodmanBackendFactory;
 use agentsandbox_daemon::{
     config::load_config, reaper, registry::BackendRegistry, router, state::AppState,
@@ -50,6 +51,11 @@ async fn main() -> anyhow::Result<()> {
             }
             "podman" => {
                 let factory = PodmanBackendFactory;
+                registry.register(&factory);
+                registry.initialize(&factory, &backend_config).await;
+            }
+            "gvisor" => {
+                let factory = GVisorBackendFactory;
                 registry.register(&factory);
                 registry.initialize(&factory, &backend_config).await;
             }

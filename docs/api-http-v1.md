@@ -101,6 +101,28 @@ spec:
 EOF
 ```
 
+Internal daemon-only backend extensions can be passed outside the public spec with
+the `X-AgentSandbox-Extensions` header. The header value must be a JSON object.
+This is intentionally not part of `sandbox.ai/v1`.
+
+Example:
+
+```bash
+curl -sS \
+  -H 'Content-Type: application/json' \
+  -H 'X-AgentSandbox-Extensions: {"gvisor":{"network":"host"}}' \
+  -d '{
+    "apiVersion": "sandbox.ai/v1",
+    "kind": "Sandbox",
+    "metadata": {},
+    "spec": {
+      "runtime": { "preset": "python" },
+      "scheduling": { "backend": "gvisor" }
+    }
+  }' \
+  http://127.0.0.1:7847/v1/sandboxes
+```
+
 Extended `v1` request:
 
 ```bash
