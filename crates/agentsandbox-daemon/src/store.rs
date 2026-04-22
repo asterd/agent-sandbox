@@ -434,3 +434,55 @@ pub async fn consume_hourly_quota(
 pub fn hash_api_key_for_tests(key: &str) -> String {
     api_key_hash(key)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_ir_omits_secret_env_from_serialization() {
+        let mut ir = SandboxIR::default();
+        ir.secret_env
+            .push(("API_KEY".into(), "super-secret-value".into()));
+
+        let stored = StoredIr::from(&ir);
+        let encoded = serde_json::to_string(&stored).unwrap();
+
+        assert!(!encoded.contains("secret_env"));
+        assert!(!encoded.contains("super-secret-value"));
+    }
+
+    #[test]
+    fn runtime_handle_prefers_backend_handle_when_present() {
+        let row = SandboxRow {
+            id: "sb-1".into(),
+            tenant_id: None,
+            lease_token: "lease".into(),
+            status: "running".into(),
+            backend: "docker".into(),
+            backend_handle: Some("native-123".into()),
+            created_at: Utc::now(),
+            expires_at: Utc::now(),
+            error_message: None,
+        };
+
+        assert_eq!(row.runtime_handle(), "native-123");
+    }
+
+    #[test]
+    fn runtime_handle_falls_back_to_public_id() {
+        let row = SandboxRow {
+            id: "sb-1".into(),
+            tenant_id: None,
+            lease_token: "lease".into(),
+            status: "running".into(),
+            backend: "docker".into(),
+            backend_handle: None,
+            created_at: Utc::now(),
+            expires_at: Utc::now(),
+            error_message: None,
+        };
+
+        assert_eq!(row.runtime_handle(), "sb-1");
+    }
+}

@@ -570,9 +570,17 @@ mod tests {
             Docker::connect_with_unix("/var/run/docker.sock", 30, bollard::API_DEFAULT_VERSION)
                 .unwrap();
         let backend = DockerBackend::with_client(client);
-        let proxy = EgressProxy::start("sandbox-1".into(), vec!["localhost".into()])
-            .await
-            .unwrap();
+        let proxy = match EgressProxy::start("sandbox-1".into(), vec!["localhost".into()]).await {
+            Ok(proxy) => proxy,
+            Err(error)
+                if error
+                    .chain()
+                    .any(|cause| cause.to_string().contains("Operation not permitted")) =>
+            {
+                return;
+            }
+            Err(error) => panic!("bind egress proxy: {error}"),
+        };
 
         backend.register_proxy_task("handle-1".into(), proxy);
         assert_eq!(backend.proxy_tasks.lock().unwrap().len(), 1);

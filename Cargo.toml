@@ -29,7 +29,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 jsonschema = "0.17"
-sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls", "macros"] }
+sqlx = { version = "0.8.1", default-features = false, features = ["sqlite", "runtime-tokio", "macros", "migrate"] }
 bollard = "0.16"
 uuid = { version = "1", features = ["v4"] }
 thiserror = "1"
@@ -41,7 +41,7 @@ async-trait = "0.1"
 futures = "0.3"
 config = { version = "0.14", features = ["toml", "yaml"] }
 tempfile = "3"
-wasmtime = "18"
+wasmtime = "36.0.7"
 sha2 = "0.10"
 
 [profile.release]

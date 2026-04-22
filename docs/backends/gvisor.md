@@ -43,7 +43,6 @@ spec:
 
 - The backend reuses the Docker execution path and only overrides the container runtime.
 - If the Docker runtime is missing, `health_check()` returns an explicit `Unavailable` error with the gVisor install URL.
-- Backend-specific extensions are supported when `SandboxIR.extensions` is populated by an internal caller.
+- Backend-specific extensions are supported through `spec.extensions.gvisor`.
 - The current backend implementation supports `extensions.gvisor.network` with `sandbox`, `host`, and `none`.
-- The public `sandbox.ai/v1` spec does not expose `extensions` yet, so this is backend-layer support rather than a public API field.
 - gVisor platform selection is intentionally not exposed yet because the current Docker `runsc` integration only guarantees a backend-level runtime choice via `backends.gvisor.runtime`.

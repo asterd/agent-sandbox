@@ -119,6 +119,7 @@ pub enum AuditEventKind {
     ExecStarted { command_hash: String },
     ExecFinished { exit_code: i64, duration_ms: u64 },
     SandboxDestroyed { reason: DestroyReason },
+    SecurityWarning { code: String, message: String },
     EgressAllowed { hostname: String },
     EgressDenied { hostname: String },
     BackendError { error: String },
@@ -131,6 +132,7 @@ impl AuditEventKind {
             Self::ExecStarted { .. } => "exec_started",
             Self::ExecFinished { .. } => "exec_finished",
             Self::SandboxDestroyed { .. } => "sandbox_destroyed",
+            Self::SecurityWarning { .. } => "security_warning",
             Self::EgressAllowed { .. } => "egress_allowed",
             Self::EgressDenied { .. } => "egress_denied",
             Self::BackendError { .. } => "backend_error",
@@ -144,6 +146,26 @@ pub enum DestroyReason {
     ClientRequest,
     TtlExpired,
     BackendError,
+}
+
+impl AuditEvent {
+    pub fn security_warning(
+        sandbox_id: &str,
+        tenant_id: Option<&str>,
+        backend_id: &str,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            sandbox_id,
+            tenant_id,
+            backend_id,
+            AuditEventKind::SecurityWarning {
+                code: code.into(),
+                message: message.into(),
+            },
+        )
+    }
 }
 
 pub fn command_hash(command: &str) -> String {

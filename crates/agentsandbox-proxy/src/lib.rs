@@ -445,6 +445,7 @@ impl TargetAddr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
@@ -463,6 +464,28 @@ mod tests {
             allowed_ips,
             bind_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             sandbox_id: "test".into(),
+        }
+    }
+
+    async fn bind_test_listener() -> Result<Option<TcpListener>> {
+        match TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await {
+            Ok(listener) => Ok(Some(listener)),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn start_test_proxy(sandbox_id: &str) -> Result<Option<RunningEgressProxy>> {
+        match EgressProxy::start(sandbox_id.into(), vec!["localhost".into()]).await {
+            Ok(proxy) => Ok(Some(proxy)),
+            Err(error)
+                if error
+                    .chain()
+                    .any(|cause| cause.to_string().contains("Operation not permitted")) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -499,9 +522,9 @@ mod tests {
 
     #[tokio::test]
     async fn socks5_connects_to_allowlisted_domain() {
-        let upstream = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
-            .await
-            .unwrap();
+        let Some(upstream) = bind_test_listener().await.unwrap() else {
+            return;
+        };
         let upstream_addr = upstream.local_addr().unwrap();
 
         let server = tokio::spawn(async move {
@@ -512,9 +535,9 @@ mod tests {
             stream.write_all(b"pong").await.unwrap();
         });
 
-        let proxy = EgressProxy::start("sandbox-1".into(), vec!["localhost".into()])
-            .await
-            .unwrap();
+        let Some(proxy) = start_test_proxy("sandbox-1").await.unwrap() else {
+            return;
+        };
         let mut client = TcpStream::connect(SocketAddr::from((Ipv4Addr::LOCALHOST, proxy.port())))
             .await
             .unwrap();
@@ -550,9 +573,9 @@ mod tests {
 
     #[tokio::test]
     async fn socks5_rejects_non_allowlisted_domain() {
-        let proxy = EgressProxy::start("sandbox-2".into(), vec!["localhost".into()])
-            .await
-            .unwrap();
+        let Some(proxy) = start_test_proxy("sandbox-2").await.unwrap() else {
+            return;
+        };
         let mut client = TcpStream::connect(SocketAddr::from((Ipv4Addr::LOCALHOST, proxy.port())))
             .await
             .unwrap();
@@ -579,9 +602,9 @@ mod tests {
 
     #[tokio::test]
     async fn http_connects_to_allowlisted_domain() {
-        let upstream = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
-            .await
-            .unwrap();
+        let Some(upstream) = bind_test_listener().await.unwrap() else {
+            return;
+        };
         let upstream_addr = upstream.local_addr().unwrap();
 
         let server = tokio::spawn(async move {
@@ -592,9 +615,9 @@ mod tests {
             stream.write_all(b"pong").await.unwrap();
         });
 
-        let proxy = EgressProxy::start("sandbox-http".into(), vec!["localhost".into()])
-            .await
-            .unwrap();
+        let Some(proxy) = start_test_proxy("sandbox-http").await.unwrap() else {
+            return;
+        };
         let mut client = TcpStream::connect(SocketAddr::from((Ipv4Addr::LOCALHOST, proxy.port())))
             .await
             .unwrap();

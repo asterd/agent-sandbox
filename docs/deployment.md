@@ -288,37 +288,32 @@ Example flow for a Python app:
 
 The same flow applies to TypeScript.
 
-## Hidden Backend Extensions
+## Backend Extensions
 
-The public spec remains `sandbox.ai/v1`.
+The public contract remains `sandbox.ai/v1`.
 
-Backend-specific hidden extensions can be sent through the daemon-only header:
-
-```text
-X-AgentSandbox-Extensions
-```
-
-The header value must be a JSON object.
+Backend-specific options travel in `spec.extensions` and are validated against the
+selected backend schema exposed at `GET /v1/backends/:id/extensions-schema`.
 
 Example:
 
 ```bash
 curl -sS \
   -H 'Content-Type: application/json' \
-  -H 'X-AgentSandbox-Extensions: {"gvisor":{"network":"host"}}' \
   -d '{
     "apiVersion": "sandbox.ai/v1",
     "kind": "Sandbox",
     "metadata": {},
     "spec": {
       "runtime": { "preset": "python" },
-      "scheduling": { "backend": "gvisor" }
+      "scheduling": { "backend": "gvisor" },
+      "extensions": {
+        "gvisor": { "network": "host" }
+      }
     }
   }' \
   http://127.0.0.1:7847/v1/sandboxes
 ```
-
-Today this path exists at the daemon/backend layer, not as a public SDK field.
 
 ## Deployment Topologies
 

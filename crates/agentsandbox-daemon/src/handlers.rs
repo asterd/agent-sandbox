@@ -206,6 +206,20 @@ fn validate_backend_extensions_schema(
     Ok(())
 }
 
+fn extensions_request_privileged(backend_id: &str, extensions: Option<&Value>) -> bool {
+    let Some(extensions) = extensions else {
+        return false;
+    };
+
+    let pointer = match backend_id {
+        "docker" => "/docker/hostConfig/privileged",
+        "podman" => "/podman/hostConfig/privileged",
+        _ => return false,
+    };
+
+    extensions.pointer(pointer).and_then(Value::as_bool) == Some(true)
+}
+
 pub async fn create_sandbox(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
@@ -258,7 +272,7 @@ pub async fn create_sandbox(
     // audit trail is more useful than a clean table.
     match backend.create(&ir).await {
         Ok(handle) => {
-            if let Err(error) = persist_created_sandbox(
+            persist_created_sandbox(
                 &state,
                 &backend,
                 &backend_id,
@@ -267,9 +281,20 @@ pub async fn create_sandbox(
                 auth.tenant_id(),
                 ir.ttl_seconds,
             )
-            .await
-            {
-                return Err(error);
+            .await?;
+
+            if extensions_request_privileged(&backend_id, ir.extensions.as_ref()) {
+                audit::record(
+                    &state.db,
+                    AuditEvent::security_warning(
+                        &ir.id,
+                        auth.tenant_id(),
+                        &backend_id,
+                        "privileged_extension",
+                        format!("{backend_id} extensions request privileged=true"),
+                    ),
+                )
+                .await;
             }
         }
         Err(e) => {
@@ -901,7 +926,6 @@ mod tests {
         Arc<Mutex<Vec<String>>>,
         Arc<Mutex<Option<Value>>>,
     ) {
-        let mut registry = BackendRegistry::new();
         let destroyed = Arc::new(Mutex::new(Vec::new()));
         let last_extensions = Arc::new(Mutex::new(None));
         let factory = MockFactory {
@@ -912,7 +936,6 @@ mod tests {
             allow_extensions: false,
             extensions_schema: None,
         };
-        let _ = registry;
         test_state_with_factory(db, factory).await
     }
 
@@ -924,7 +947,6 @@ mod tests {
         Arc<Mutex<Vec<String>>>,
         Arc<Mutex<Option<Value>>>,
     ) {
-        let mut registry = BackendRegistry::new();
         let destroyed = Arc::new(Mutex::new(Vec::new()));
         let last_extensions = Arc::new(Mutex::new(None));
         let factory = MockFactory {
@@ -935,7 +957,6 @@ mod tests {
             allow_extensions: true,
             extensions_schema: Some("{}"),
         };
-        let _ = registry;
         test_state_with_factory(db, factory).await
     }
 
@@ -1424,6 +1445,106 @@ mod tests {
             .unwrap();
         let payload: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload["title"], "Docker Backend Extensions");
+    }
+
+    #[tokio::test]
+    async fn create_and_inspect_responses_never_expose_backend_handle() {
+        let db = test_db().await;
+        let (state, _, _) = test_state(db, InspectBehavior::Status(SandboxState::Running)).await;
+        let app = router::build(state);
+
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"apiVersion":"sandbox.ai/v1","kind":"Sandbox","metadata":{},"spec":{"runtime":{"preset":"python"}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(create.status(), axum::http::StatusCode::CREATED);
+        let create_body = axum::body::to_bytes(create.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let created: Value = serde_json::from_slice(&create_body).unwrap();
+        assert!(created.get("backend_handle").is_none());
+
+        let sandbox_id = created["sandbox_id"].as_str().unwrap();
+        let inspect = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/sandboxes/{sandbox_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(inspect.status(), axum::http::StatusCode::OK);
+        let inspect_body = axum::body::to_bytes(inspect.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&inspect_body).unwrap();
+        assert!(payload.get("backend_handle").is_none());
+        assert!(!payload.to_string().contains("handle-"));
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_audits_privileged_extension_request() {
+        let db = test_db().await;
+        let (state, _, _) = test_state_for_backend_with_schema(
+            db.clone(),
+            InspectBehavior::Status(SandboxState::Running),
+            "docker",
+            Some(include_str!(
+                "../../agentsandbox-backend-docker/schema/extensions.schema.json"
+            )),
+        )
+        .await;
+        let app = router::build(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"apiVersion":"sandbox.ai/v1","kind":"Sandbox","metadata":{},"spec":{"runtime":{"preset":"python"},"scheduling":{"backend":"docker"},"extensions":{"docker":{"hostConfig":{"privileged":true}}}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+        let create_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let created: CreateResponse = serde_json::from_slice(&create_body).unwrap();
+
+        let row = sqlx::query(
+            "SELECT event, detail FROM audit_log WHERE sandbox_id = ?1 ORDER BY id ASC",
+        )
+        .bind(&created.sandbox_id)
+        .fetch_all(&db)
+        .await
+        .unwrap();
+
+        assert!(row.iter().any(|record| {
+            let event: String = record.get("event");
+            let detail: String = record.get("detail");
+            event == "security_warning"
+                && detail.contains("privileged_extension")
+                && detail.contains("privileged=true")
+        }));
     }
 
     #[tokio::test]
