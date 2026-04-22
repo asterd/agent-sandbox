@@ -1,19 +1,19 @@
 <p align="center">
-  <img src="docs/assets/agentsandbox-icon.svg" alt="AgentSandbox icon" width="140" />
+  <img src="docs/assets/agent-sandbox-icon.png" alt="AgentSandbox icon" width="140" />
 </p>
 
 # AgentSandbox
 
 AgentSandbox is a local sandbox runtime for LLM agents and agentic tools.
 
-It gives you one stable primitive:
+It exposes one narrow operational surface:
 
 - create an isolated sandbox
 - execute commands inside it
 - inspect status and TTL
 - destroy it
 
-Your agent talks to a small local HTTP daemon through Python or TypeScript SDKs. The daemon does not need to know which backend your code was written against, and the core does not link backend crates directly anymore: backends are external plugins discovered at runtime.
+Agents talk to a small local HTTP daemon through Python or TypeScript SDKs. The daemon routes work to backend plugins discovered at runtime, so the control plane stays stable while isolation backends remain replaceable.
 
 ## Why this exists
 
@@ -21,9 +21,10 @@ Agent code often needs to run untrusted or model-generated commands without givi
 
 - agents use SDKs, not Docker or namespace internals
 - the daemon enforces lifecycle, leases, TTL, persistence, and audit surface
-- backends stay replaceable: Docker today, others through plugins
+- backend selection is explicit and plugin-driven
+- backend-specific tuning lives behind `spec.extensions`
 
-The target user experience is still the same:
+Minimal Python flow:
 
 ```python
 from agentsandbox import Sandbox
@@ -38,10 +39,11 @@ async with Sandbox(runtime="python", ttl=900) as sb:
 - `crates/agentsandbox-daemon`: local HTTP daemon
 - `crates/agentsandbox-core`: public spec parsing and `spec -> IR` compilation
 - `crates/agentsandbox-sdk`: stable backend SDK and plugin protocol
-- `crates/agentsandbox-backend-*`: backend plugins, each buildable and installable independently
+- `crates/agentsandbox-backend-*`: backend plugins, buildable and installable independently
 - `sdks/python`: async Python SDK
 - `sdks/typescript`: async TypeScript SDK
-- `examples/`: runnable end-to-end examples, including OpenAI-compatible LLM flows
+- `examples/`: runnable end-to-end examples
+- `docs/`: public API, deployment, and backend notes
 
 ## Architecture
 
@@ -58,28 +60,30 @@ AgentSandbox daemon
 Discovered backend plugins
   - agentsandbox-backend-docker
   - agentsandbox-backend-podman
+  - agentsandbox-backend-bubblewrap
   - agentsandbox-backend-wasmtime
   - ...
 ```
 
-Backend plugins are normal executables named `agentsandbox-backend-*`. The daemon discovers them from configured search directories plus `PATH`, starts them as subprocesses, and talks to them through a JSON line protocol. This keeps the core independent from backend implementation crates and allows installations with zero, one, or many plugins.
+Backend plugins are normal executables named `agentsandbox-backend-*`. The daemon discovers them from configured search directories plus `PATH`, starts them as subprocesses, and talks to them through a JSON line protocol.
 
 ## Status
 
-Implemented and passing in the workspace today:
+Implemented in the workspace today:
 
 - public `sandbox.ai/v1` spec
-- JSON and YAML input support
+- spec submission in JSON and YAML
 - daemon with Axum + SQLite + TTL reaper
 - Python SDK
 - TypeScript SDK
 - runtime plugin discovery and loading
-- backend conformance tests in the workspace
+- backend conformance coverage in the workspace
 
-Important current limits:
+Current limits worth knowing:
 
-- filtered egress in `v1` is still an interim design; the long-term direction remains the proxy L4 path
-- plugin discovery is runtime-based, so a backend must be built or installed as an executable before the daemon can use it
+- daemon config files are loaded from TOML or YAML, not JSON
+- filtered egress in `v1` is still an interim design; the long-term direction remains the proxy-based path
+- backend plugins must exist as executables before the daemon can use them
 - examples that use an LLM assume an OpenAI-compatible `chat.completions` endpoint
 
 ## Requirements
@@ -87,7 +91,8 @@ Important current limits:
 - Rust toolchain
 - Python 3.10+
 - Node.js 18+
-- Docker running locally if you want to use the Docker backend
+- Docker running locally if you want the Docker backend
+- Linux-specific host tools for some backends such as `bwrap`, `nsjail`, `runsc`, or `/dev/kvm`
 
 ## Quickstart
 
@@ -107,7 +112,11 @@ This produces `target/debug/agentsandbox-backend-docker`, which the daemon disco
 cargo run -p agentsandbox-daemon
 ```
 
-By default it reads `agentsandbox.toml`, listens on `http://127.0.0.1:7847`, and stores state in `sqlite://agentsandbox.db`.
+By default the daemon:
+
+- reads `agentsandbox.toml` if present
+- listens on `http://127.0.0.1:7847`
+- stores state in `sqlite://agentsandbox.db`
 
 ### 3. Verify health
 
@@ -121,9 +130,49 @@ Expected shape:
 {"status":"ok","backend":"docker","backends":["docker"]}
 ```
 
-If no backend plugins are available, the daemon still starts, but sandbox creation will fail until you build or install at least one plugin.
+If no backend plugins are available, the daemon still starts, but sandbox creation will fail until at least one backend is built or installed.
 
-### 4. Use the Python SDK
+### 4. Create a sandbox through the HTTP API
+
+JSON request:
+
+```bash
+curl -sS http://127.0.0.1:7847/v1/sandboxes \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "apiVersion": "sandbox.ai/v1",
+    "kind": "Sandbox",
+    "metadata": {},
+    "spec": {
+      "runtime": { "preset": "python" },
+      "resources": { "cpuMillicores": 500, "memoryMb": 512 },
+      "limits": { "timeoutMs": 30000, "ttlSeconds": 300 }
+    }
+  }'
+```
+
+YAML request:
+
+```bash
+curl -sS http://127.0.0.1:7847/v1/sandboxes \
+  -H 'Content-Type: application/yaml' \
+  --data-binary @- <<'YAML'
+apiVersion: sandbox.ai/v1
+kind: Sandbox
+metadata: {}
+spec:
+  runtime:
+    preset: python
+  resources:
+    cpuMillicores: 500
+    memoryMb: 512
+  limits:
+    timeoutMs: 30000
+    ttlSeconds: 300
+YAML
+```
+
+### 5. Use the Python SDK
 
 ```bash
 cd sdks/python
@@ -138,15 +187,15 @@ from agentsandbox import Sandbox
 
 
 async def main() -> None:
-    async with Sandbox(runtime="python", ttl=300) as sb:
-        result = await sb.exec("python -c 'print(42)'")
+    async with Sandbox(runtime="python", ttl=300, memory_mb=512) as sb:
+        result = await sb.exec("python -c 'print(6 * 7)'")
         print(result.stdout, end="")
 
 
 asyncio.run(main())
 ```
 
-### 5. Use the TypeScript SDK
+### 6. Use the TypeScript SDK
 
 ```bash
 cd sdks/typescript
@@ -157,21 +206,36 @@ npm run build
 ```ts
 import { Sandbox } from "agentsandbox";
 
-await using sb = await Sandbox.create({ runtime: "python", ttl: 300 });
-const result = await sb.exec("python -c 'print(42)'");
+await using sb = await Sandbox.create({
+  runtime: "python",
+  ttl: 300,
+  memoryMb: 512,
+  cpuMillicores: 500,
+});
+
+const result = await sb.exec("python -c 'print(6 * 7)'");
 console.log(result.stdout.trim());
 ```
 
-## Configuration
+## Configuration and Spec Formats
 
-The daemon supports TOML and YAML config files.
+There are two separate format surfaces:
 
-Minimal example:
+- daemon config files: `TOML` or `YAML`
+- sandbox creation requests (`POST /v1/sandboxes`): `JSON` or `YAML`
+
+### Daemon config file
+
+The daemon loads `agentsandbox.toml` by default, or another file via `AS_CONFIG`. Files ending in `.yaml` or `.yml` are parsed as YAML; everything else is treated as TOML.
+
+TOML example:
 
 ```toml
 [daemon]
 host = "127.0.0.1"
 port = 7847
+log_level = "info"
+log_format = "text"
 
 [database]
 url = "sqlite://agentsandbox.db"
@@ -180,11 +244,42 @@ url = "sqlite://agentsandbox.db"
 mode = "single_user"
 
 [backends]
-enabled = ["docker"]
-search_dirs = ["target/debug"]
+enabled = ["docker", "podman"]
+search_dirs = ["target/debug", "/opt/agentsandbox/plugins"]
 
 [backends.docker]
 socket = "/var/run/docker.sock"
+
+[backends.podman]
+socket = "/run/user/1000/podman/podman.sock"
+```
+
+Equivalent YAML example:
+
+```yaml
+daemon:
+  host: 127.0.0.1
+  port: 7847
+  log_level: info
+  log_format: text
+
+database:
+  url: sqlite://agentsandbox.db
+
+auth:
+  mode: single_user
+
+backends:
+  enabled:
+    - docker
+    - podman
+  search_dirs:
+    - target/debug
+    - /opt/agentsandbox/plugins
+  docker:
+    socket: /var/run/docker.sock
+  podman:
+    socket: /run/user/1000/podman/podman.sock
 ```
 
 Useful environment overrides:
@@ -192,6 +287,8 @@ Useful environment overrides:
 - `AS_CONFIG`
 - `AS_DAEMON_HOST`
 - `AS_DAEMON_PORT`
+- `AS_DAEMON_LOG_LEVEL`
+- `AS_DAEMON_LOG_FORMAT`
 - `AS_DATABASE_URL`
 - `AS_AUTH_MODE`
 - `AS_BACKENDS_ENABLED`
@@ -201,10 +298,300 @@ Useful environment overrides:
 Example:
 
 ```bash
-AS_BACKENDS_ENABLED=docker \
+AS_BACKENDS_ENABLED=docker,gvisor \
 AS_BACKENDS_DOCKER_SOCKET=/var/run/docker.sock \
+AS_BACKENDS_GVISOR_RUNTIME=runsc \
 cargo run -p agentsandbox-daemon
 ```
+
+### Sandbox spec
+
+The public spec is `sandbox.ai/v1`. Requests accept `application/json`, `application/yaml`, and `text/yaml`.
+
+JSON example with backend routing and extensions:
+
+```json
+{
+  "apiVersion": "sandbox.ai/v1",
+  "kind": "Sandbox",
+  "metadata": {},
+  "spec": {
+    "runtime": { "preset": "python" },
+    "resources": { "cpuMillicores": 1000, "memoryMb": 1024 },
+    "limits": { "timeoutMs": 60000, "ttlSeconds": 900 },
+    "scheduling": { "backend": "docker" },
+    "extensions": {
+      "docker": {
+        "hostConfig": {
+          "capDrop": ["ALL"],
+          "shmSizeMb": 64
+        }
+      }
+    }
+  }
+}
+```
+
+Rule to keep in mind:
+
+- `spec.extensions` requires `spec.scheduling.backend`
+- extensions are validated against the selected backend schema
+- some fields remain forbidden even inside extensions, for example Docker and Podman `networkMode`; use `spec.network.egress` instead
+
+## Backend Plugins
+
+The daemon can list discovered backends:
+
+```bash
+curl -sS http://127.0.0.1:7847/v1/backends
+```
+
+Every backend can also expose a live schema for its escape hatch:
+
+```bash
+curl -sS http://127.0.0.1:7847/v1/backends/docker/extensions-schema
+```
+
+`spec.extensions` is the general escape hatch for backend-specific knobs. The recommended pattern is:
+
+1. route explicitly to a backend with `spec.scheduling.backend`
+2. inspect `/v1/backends/:id/extensions-schema`
+3. send only documented extension fields for that backend
+
+### `docker`
+
+Supported presets:
+
+- `python`
+- `node`
+- `rust`
+- `shell`
+
+Daemon config parameters:
+
+- `socket` default: `/var/run/docker.sock`
+
+Capabilities:
+
+- container isolation
+- network isolation
+- hard CPU and memory limits
+
+Supported extensions under `spec.extensions.docker.hostConfig`:
+
+- `capAdd`
+- `capDrop`
+- `securityOpt`
+- `privileged`
+- `shmSizeMb`
+- `sysctls`
+- `binds`
+- `devices`
+- `ulimits`
+
+Example:
+
+```yaml
+spec:
+  runtime:
+    preset: python
+  scheduling:
+    backend: docker
+  extensions:
+    docker:
+      hostConfig:
+        capDrop: ["ALL"]
+        shmSizeMb: 64
+```
+
+### `podman`
+
+Supported presets:
+
+- `python`
+- `node`
+- `rust`
+- `shell`
+
+Daemon config parameters:
+
+- `socket`
+  Default resolution order:
+  `${XDG_RUNTIME_DIR}/podman/podman.sock` -> `/run/user/<uid>/podman/podman.sock` -> `/run/podman/podman.sock`
+
+Capabilities:
+
+- same execution model as Docker
+- rootless-friendly default
+- same extension schema as Docker
+
+Example:
+
+```toml
+[backends.podman]
+socket = "/run/user/1000/podman/podman.sock"
+```
+
+### `bubblewrap`
+
+Supported presets:
+
+- `python`
+- `node`
+- `rust`
+- `shell`
+
+Daemon config parameters:
+
+- `bwrap_path` default: `bwrap`
+- `rootfs_base` default: temp dir under `agentsandbox-bubblewrap`
+
+Capabilities:
+
+- rootless process isolation
+- network isolation
+- no hard CPU or memory limit enforcement in the current implementation
+
+Supported extensions under `spec.extensions.bubblewrap`:
+
+- `roBind`
+- `rwBind`
+- `gpuAccess`
+- `extraArgs`
+
+Example:
+
+```yaml
+spec:
+  runtime:
+    preset: shell
+  scheduling:
+    backend: bubblewrap
+  extensions:
+    bubblewrap:
+      roBind:
+        - ["/opt/data/model.bin", "/workspace/model.bin"]
+```
+
+### `wasmtime`
+
+Supported presets:
+
+- `python`
+- `node`
+
+Daemon config parameters:
+
+- `python_wasm_path`
+- `node_wasm_path`
+
+Capabilities:
+
+- self-contained process backend
+- network isolation
+- hard CPU and memory limits
+
+Current execution scope:
+
+- `echo ...`
+- `echo ... >&2`
+- `exit N`
+- `python -c 'print(expr)'` for simple arithmetic expressions
+
+Supported extensions under `spec.extensions.wasmtime`:
+
+- `wasmBinary`
+- `maxMemoryMb`
+- `preloadedModules`
+
+### `gvisor`
+
+Supported presets:
+
+- `python`
+- `node`
+- `rust`
+- `shell`
+
+Daemon config parameters:
+
+- `socket` default: `/var/run/docker.sock`
+- `runtime` default: `runsc`
+
+Capabilities:
+
+- kernel-sandbox isolation level
+- hard CPU and memory limits
+- Docker-compatible execution path with `runsc`
+
+Supported extensions under `spec.extensions.gvisor`:
+
+- `network` with values `sandbox`, `host`, `none`
+
+### `libkrun`
+
+Supported presets:
+
+- `python`
+- `node`
+- `shell`
+
+Daemon config parameters:
+
+- `socket` default: Podman socket resolution
+- `runtime` default: `krun`
+
+Capabilities:
+
+- microVM isolation level
+- hard CPU and memory limits
+- requires Linux and `/dev/kvm`
+
+Supported extensions under `spec.extensions.libkrun`:
+
+- `networkMode`
+- `rootfsOverlay`
+
+### `nsjail`
+
+Supported presets:
+
+- `python`
+- `node`
+- `rust`
+- `shell`
+
+Daemon config parameters:
+
+- `nsjail_path` default: `nsjail`
+- `chroot_base` default: temp dir under `agentsandbox-nsjail`
+
+Capabilities:
+
+- process isolation on Linux
+- hard CPU and memory limits
+
+Supported extensions under `spec.extensions.nsjail`:
+
+- `seccompPolicy`
+- `rlimitNofile`
+- `rlimitNproc`
+- `bindmountRo`
+- `cgroupMemMax`
+
+### About the escape hatch
+
+`extensions` is intentionally backend-specific. It exists for features that do not belong in the portable public spec yet.
+
+Use it when:
+
+- you need a backend-native flag that is already implemented and documented
+- you are evaluating a backend feature before promoting it into the stable spec
+
+Avoid using it when:
+
+- a portable field already exists in the public spec
+- the requested field changes the security contract in a backend-specific way without audit visibility
 
 ## Examples
 
@@ -213,7 +600,7 @@ The examples are meant to be runnable, not decorative.
 - [examples/01-hello-sandbox](examples/01-hello-sandbox/README.md): minimal Python flow
 - [examples/02-code-review-agent](examples/02-code-review-agent/README.md): Python code review loop using an OpenAI-compatible model loaded from `.env`
 - [examples/03-dependency-auditor](examples/03-dependency-auditor/README.md): TypeScript dependency audit with an OpenAI-compatible summary
-- [examples/04-multi-backend-demo](examples/04-multi-backend-demo/README.md): same workload across all discovered Python-capable backends
+- [examples/04-multi-backend-demo](examples/04-multi-backend-demo/README.md): same workload across discovered Python-capable backends
 
 Workspace-wide verification:
 
@@ -221,14 +608,14 @@ Workspace-wide verification:
 bash examples/verify_all.sh
 ```
 
-The script skips examples whose local prerequisites are missing instead of failing for trivial bootstrap reasons.
-
-## Public API
+## Public API and Docs
 
 - [docs/spec-v1.md](docs/spec-v1.md)
 - [docs/api-http-v1.md](docs/api-http-v1.md)
 - [docs/getting-started.md](docs/getting-started.md)
 - [docs/deployment.md](docs/deployment.md)
+- [docs/backends/docker.md](docs/backends/docker.md)
+- [docs/backends/podman.md](docs/backends/podman.md)
 - [examples/README.md](examples/README.md)
 
 ## Extending AgentSandbox
@@ -238,12 +625,13 @@ If you want to add a backend:
 1. Create a crate named `agentsandbox-backend-<name>`.
 2. Implement `BackendFactory` and `SandboxBackend` from `agentsandbox-sdk`.
 3. Add a `src/main.rs` that serves the plugin protocol.
-4. Ship the executable so the daemon can discover it from `PATH` or `backends.search_dirs`.
-5. Add conformance tests and backend docs.
+4. Expose an `extensions_schema` if the backend supports backend-specific options.
+5. Ship the executable so the daemon can discover it from `PATH` or `backends.search_dirs`.
+6. Add conformance tests and backend docs.
 
 Start from [BACKEND_GUIDE.md](BACKEND_GUIDE.md).
 
-The important boundary is this: if the daemon needs to link your crate to use it, the architecture is wrong.
+The architectural boundary is simple: if the daemon needs to link your backend crate to use it, the plugin boundary is wrong.
 
 ## Contributing
 
@@ -261,12 +649,18 @@ When touching examples, also run:
 bash examples/verify_all.sh
 ```
 
-Good issues to work on:
+## Development Ideas
 
-- tighten backend capability matching
-- improve plugin install/distribution ergonomics
+Good next areas to push:
+
+- tighten backend capability matching so routing decisions become more explainable
+- improve plugin install and distribution ergonomics for out-of-tree backends
 - expand conformance coverage for non-Docker backends
 - push the egress model toward the stable proxy-based path
+- ship a production-ready `firecracker` backend instead of only reserving the contract surface
+- add a `kata-containers` or equivalent VM-backed plugin for a clearer middle ground between containers and microVMs
+- add an `incus` or `lxc` backend for teams that already run system-container tooling
+- improve backend docs so each plugin has a concrete matrix of presets, host requirements, and extension fields
 
 ## License
 
