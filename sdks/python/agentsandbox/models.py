@@ -28,6 +28,18 @@ class ExecResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecStreamEvent:
+    """Single event produced by ``Sandbox.exec_stream``."""
+
+    event: str
+    chunk: str | None = None
+    exit_code: int | None = None
+    duration_ms: int | None = None
+    sandbox_id: str | None = None
+    backend: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SandboxInfo:
     """Inspect response for a sandbox.
 
@@ -138,4 +150,4 @@ class SandboxConfig:
         }
 
 
-__all__ = ["ExecResult", "SandboxInfo", "SandboxConfig"]
+__all__ = ["ExecResult", "ExecStreamEvent", "SandboxInfo", "SandboxConfig"]

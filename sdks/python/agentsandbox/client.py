@@ -19,12 +19,12 @@ from __future__ import annotations
 
 import logging
 from copy import deepcopy
-from typing import Any
+from typing import Any, AsyncIterator
 
 import httpx
 
 from .exceptions import SandboxError, exception_for
-from .models import ExecResult, SandboxConfig, SandboxInfo
+from .models import ExecResult, ExecStreamEvent, SandboxConfig, SandboxInfo
 
 DEFAULT_DAEMON_URL = "http://127.0.0.1:7847"
 DEFAULT_TIMEOUT = 60.0
@@ -174,12 +174,94 @@ class Sandbox:
             error_message=data.get("error_message"),
         )
 
+    async def upload_file(self, path: str, content: bytes) -> None:
+        sandbox_id = self._require_active()
+        response = await self._client.post(
+            f"/v1/sandboxes/{sandbox_id}/files",
+            params={"path": path},
+            content=content,
+            headers={LEASE_HEADER: self._lease_token or ""},
+        )
+        self._handle_response(response)
+
+    async def download_file(self, path: str) -> bytes:
+        sandbox_id = self._require_active()
+        response = await self._client.get(
+            f"/v1/sandboxes/{sandbox_id}/files/{path}",
+            headers={LEASE_HEADER: self._lease_token or ""},
+        )
+        if response.is_success:
+            return response.content
+        code, message, details = _parse_error(response)
+        raise exception_for(
+            code,
+            message,
+            details=details,
+            status_code=response.status_code,
+        )
+
+    async def snapshot(self) -> str:
+        sandbox_id = self._require_active()
+        response = await self._client.post(
+            f"/v1/sandboxes/{sandbox_id}/snapshot",
+            headers={LEASE_HEADER: self._lease_token or ""},
+        )
+        data = self._handle_response(response)
+        return str(data["snapshot_id"])
+
+    async def exec_stream(self, command: str) -> AsyncIterator[ExecStreamEvent]:
+        sandbox_id = self._require_active()
+        async with self._client.stream(
+            "POST",
+            f"/v1/sandboxes/{sandbox_id}/exec",
+            params={"stream": "1"},
+            json={"command": command},
+            headers={LEASE_HEADER: self._lease_token or ""},
+        ) as response:
+            if not response.is_success:
+                payload = await response.aread()
+                err_response = httpx.Response(
+                    response.status_code,
+                    headers=response.headers,
+                    content=payload,
+                    request=response.request,
+                )
+                code, message, details = _parse_error(err_response)
+                raise exception_for(
+                    code,
+                    message,
+                    details=details,
+                    status_code=response.status_code,
+                )
+            async for line in response.aiter_lines():
+                if not line:
+                    continue
+                data = self._parse_stream_event(line, response.status_code)
+                yield ExecStreamEvent(
+                    event=data["event"],
+                    chunk=data.get("chunk"),
+                    exit_code=data.get("exit_code"),
+                    duration_ms=data.get("duration_ms"),
+                    sandbox_id=data.get("sandbox_id"),
+                    backend=data.get("backend"),
+                )
+
     def _require_active(self) -> str:
         if not self._sandbox_id:
             raise SandboxError(
                 "Sandbox non inizializzata. Usa 'async with Sandbox(...) as sb:'."
             )
         return self._sandbox_id
+
+    @staticmethod
+    def _parse_stream_event(line: str, status_code: int) -> dict[str, Any]:
+        try:
+            payload = httpx.Response(status_code, content=line).json()
+        except ValueError as exc:
+            raise SandboxError(f"Evento stream non JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise SandboxError("Evento stream non valido")
+        return payload
 
     async def _create(self) -> None:
         spec = self._config.to_spec()

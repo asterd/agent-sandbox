@@ -44,4 +44,18 @@ impl AuthContext {
             Self::Tenant(tenant) => Some(tenant.quota_hourly),
         }
     }
+
+    pub fn concurrent_quota(&self) -> Option<i64> {
+        match self {
+            Self::SingleUser => None,
+            Self::Tenant(tenant) => Some(tenant.quota_concurrent),
+        }
+    }
+
+    pub fn allowed_backends(&self) -> Option<&[String]> {
+        match self {
+            Self::SingleUser => None,
+            Self::Tenant(tenant) => Some(&tenant.allowed_backends),
+        }
+    }
 }

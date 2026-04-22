@@ -4,6 +4,12 @@
 
 ### Added
 
+- Internal-service hardening for Scenario 1: explicit `limits`, `audit`, `security`, and tenant backend allowlists in daemon config.
+- `GET /v1/runtime-info`, tenant usage inspection, upload/download/snapshot/restore HTTP endpoints, and NDJSON execution streaming.
+- Concurrent quota enforcement via persisted tenant usage with reconciliation on startup.
+- Internal operations artifacts: systemd unit, internal config example, tenant bootstrap script, runtime export script, smoke checklist, and troubleshooting docs.
+- SDK additions for Python and TypeScript: `upload_file`/`uploadFile`, `download_file`/`downloadFile`, `snapshot`, and `exec_stream`/`execStream`.
+- Example `05-file-stream-demo` covering upload, stream, download, and destroy.
 - `sandbox.ai/v1` support in the core compile pipeline via `compile_any()` and runtime `apiVersion` detection.
 - Official JSON Schema committed at `spec/sandbox.v1.schema.json`.
 - Structured daemon validation errors with per-field details in `error.details.validationErrors`.

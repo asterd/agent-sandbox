@@ -36,7 +36,7 @@ impl BackendFactory for BubblewrapBackendFactory {
                 isolation_level: IsolationLevel::Process,
                 supported_presets: vec!["python", "node", "rust", "shell"],
                 rootless: true,
-                snapshot_restore: false,
+                snapshot_restore: true,
             },
             extensions_schema: Some(include_str!("../schema/extensions.schema.json")),
         }

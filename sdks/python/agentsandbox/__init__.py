@@ -19,12 +19,13 @@ from .exceptions import (
     ExecTimeoutError,
     InternalDaemonError,
     LeaseInvalidError,
+    NotSupportedError,
     SandboxError,
     SandboxExpiredError,
     SandboxNotFoundError,
     SpecInvalidError,
 )
-from .models import ExecResult, SandboxConfig, SandboxInfo
+from .models import ExecResult, ExecStreamEvent, SandboxConfig, SandboxInfo
 
 __version__ = "0.1.0"
 
@@ -34,12 +35,14 @@ __all__ = [
     "SandboxConfig",
     "SandboxInfo",
     "ExecResult",
+    "ExecStreamEvent",
     "DEFAULT_DAEMON_URL",
     "SandboxError",
     "SandboxNotFoundError",
     "SandboxExpiredError",
     "SpecInvalidError",
     "BackendUnavailableError",
+    "NotSupportedError",
     "ExecTimeoutError",
     "LeaseInvalidError",
     "InternalDaemonError",

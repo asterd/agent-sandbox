@@ -86,6 +86,20 @@ Current limits worth knowing:
 - backend plugins must exist as executables before the daemon can use them
 - examples that use an LLM assume an OpenAI-compatible `chat.completions` endpoint
 
+## Capability Matrix
+
+The daemon exposes upload/download/snapshot/restore uniformly. Actual support depends on the backend implementation; unsupported operations return `NOT_SUPPORTED`.
+
+| Backend | Create / Exec / Destroy | Upload / Download | Snapshot / Restore | Notes |
+| --- | --- | --- | --- | --- |
+| `docker` | Yes | Yes | No | File transfer implemented via container archive APIs. |
+| `podman` | Yes | Yes | No | Uses the Podman socket through the Docker-compatible container API surface exposed by Podman. |
+| `gvisor` | Yes | Yes | No | Uses the Docker-compatible container API surface with `runsc` runtime checks. |
+| `libkrun` | Yes | Yes | No | Uses a Docker-compatible container API surface through a Podman/krun runtime. |
+| `bubblewrap` | Yes | Yes | Yes | Workspace-backed file I/O and filesystem snapshot/restore. |
+| `nsjail` | Yes | Yes | Yes | Workspace-backed file I/O and filesystem snapshot/restore. |
+| `wasmtime` | Yes | Yes | Yes | Compat runner plus workspace-backed file I/O and filesystem snapshot/restore. |
+
 ## Requirements
 
 - Rust toolchain

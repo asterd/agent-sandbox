@@ -17,6 +17,7 @@ export {
   ExecTimeoutError,
   InternalDaemonError,
   LeaseInvalidError,
+  NotSupportedError,
   SandboxError,
   SandboxExpiredError,
   SandboxNotFoundError,
@@ -33,6 +34,7 @@ export {
 export type {
   CreateResponse,
   ExecResult,
+  ExecStreamEvent,
   SandboxConfig,
   SandboxInfo,
   SandboxOptions,

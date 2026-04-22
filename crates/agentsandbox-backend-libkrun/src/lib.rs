@@ -110,6 +110,27 @@ impl SandboxBackend for LibkrunBackend {
         }
         self.inner.can_satisfy(ir).await
     }
+
+    async fn upload_file(
+        &self,
+        handle: &str,
+        path: &str,
+        content: &[u8],
+    ) -> Result<(), BackendError> {
+        self.inner.upload_file(handle, path, content).await
+    }
+
+    async fn download_file(&self, handle: &str, path: &str) -> Result<Vec<u8>, BackendError> {
+        self.inner.download_file(handle, path).await
+    }
+
+    async fn snapshot(&self, handle: &str) -> Result<String, BackendError> {
+        self.inner.snapshot(handle).await
+    }
+
+    async fn restore(&self, snapshot_id: &str, ir: &SandboxIR) -> Result<String, BackendError> {
+        self.inner.restore(snapshot_id, ir).await
+    }
 }
 
 #[cfg(test)]

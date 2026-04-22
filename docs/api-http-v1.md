@@ -18,6 +18,9 @@ http://127.0.0.1:7847
 - API-key mode: `X-API-Key` is required for every request and is mapped to a tenant
 - `POST /v1/sandboxes` returns `lease_token`
 - `POST /v1/sandboxes/:id/exec` requires `X-Lease-Token`
+- `POST /v1/sandboxes/:id/files` requires `X-Lease-Token`
+- `GET /v1/sandboxes/:id/files/*path` requires `X-Lease-Token`
+- `POST /v1/sandboxes/:id/snapshot` requires `X-Lease-Token`
 - `DELETE /v1/sandboxes/:id` requires `X-Lease-Token` when the sandbox exists
 
 ## Error Envelope
@@ -94,6 +97,33 @@ Example response:
       "extensions_supported": true
     }
   ]
+}
+```
+
+### `GET /v1/runtime-info`
+
+Operational metadata for service deployments.
+
+```bash
+curl -sS http://127.0.0.1:7847/v1/runtime-info
+```
+
+Example response:
+
+```json
+{
+  "daemon_version": "0.1.0",
+  "config_profile": "internal",
+  "available_backends": ["docker"],
+  "auth_mode": "api_key",
+  "db_path": "sqlite:///var/lib/agentsandbox/agentsandbox.db",
+  "config_path": "/etc/agentsandbox/agentsandbox.internal.toml",
+  "limits": {
+    "max_ttl_seconds": 3600,
+    "default_timeout_ms": 30000,
+    "max_concurrent_sandboxes": 50,
+    "max_file_bytes": 1048576
+  }
 }
 ```
 
@@ -266,6 +296,79 @@ Example response:
   "duration_ms": 37
 }
 ```
+
+When called with `?stream=1`, the response is `application/x-ndjson`:
+
+```json
+{"event":"started","sandbox_id":"sb-1","backend":"docker"}
+{"event":"stdout","chunk":"collecting...\n"}
+{"event":"stderr","chunk":""}
+{"event":"completed","exit_code":0,"duration_ms":812}
+```
+
+### `POST /v1/sandboxes/:id/files`
+
+Uploads raw bytes into the sandbox. The target path is passed as a query parameter.
+
+```bash
+curl -sS \
+  -X POST \
+  -H 'X-Lease-Token: <LEASE_TOKEN>' \
+  --data-binary @script.py \
+  'http://127.0.0.1:7847/v1/sandboxes/<SANDBOX_ID>/files?path=script.py'
+```
+
+### `GET /v1/sandboxes/:id/files/*path`
+
+Downloads raw bytes from the sandbox.
+
+```bash
+curl -sS \
+  -H 'X-Lease-Token: <LEASE_TOKEN>' \
+  http://127.0.0.1:7847/v1/sandboxes/<SANDBOX_ID>/files/result.txt
+```
+
+### `POST /v1/sandboxes/:id/snapshot`
+
+```bash
+curl -sS \
+  -X POST \
+  -H 'X-Lease-Token: <LEASE_TOKEN>' \
+  http://127.0.0.1:7847/v1/sandboxes/<SANDBOX_ID>/snapshot
+```
+
+If the backend does not support snapshots, the daemon returns:
+
+```json
+{
+  "error": {
+    "code": "NOT_SUPPORTED",
+    "message": "snapshot",
+    "details": {}
+  }
+}
+```
+
+### `POST /v1/sandboxes/restore`
+
+```json
+{
+  "snapshot_id": "snap-123",
+  "spec": {
+    "apiVersion": "sandbox.ai/v1",
+    "kind": "Sandbox",
+    "metadata": {},
+    "spec": {
+      "runtime": { "preset": "python" },
+      "scheduling": { "backend": "docker" }
+    }
+  }
+}
+```
+
+### `GET /v1/admin/tenants/:id/usage`
+
+Returns current hourly and concurrent usage for the tenant.
 
 ### `DELETE /v1/sandboxes/:id`
 

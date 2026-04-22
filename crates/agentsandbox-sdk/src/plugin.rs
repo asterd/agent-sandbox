@@ -58,15 +58,23 @@ pub struct PluginSandboxStatus {
 pub enum PluginRequest {
     Metadata,
     HealthCheck,
-    CanSatisfy { ir: SandboxIR },
-    Create { ir: SandboxIR },
+    CanSatisfy {
+        ir: SandboxIR,
+    },
+    Create {
+        ir: SandboxIR,
+    },
     Exec {
         handle: String,
         command: String,
         timeout_ms: Option<u64>,
     },
-    Status { handle: String },
-    Destroy { handle: String },
+    Status {
+        handle: String,
+    },
+    Destroy {
+        handle: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,7 +128,10 @@ impl From<ExecResult> for PluginExecResult {
             stderr: value.stderr,
             exit_code: value.exit_code,
             duration_ms: value.duration_ms,
-            cpu_user_ms: value.resource_usage.as_ref().and_then(|usage| usage.cpu_user_ms),
+            cpu_user_ms: value
+                .resource_usage
+                .as_ref()
+                .and_then(|usage| usage.cpu_user_ms),
             memory_peak_mb: value
                 .resource_usage
                 .as_ref()
@@ -222,11 +233,11 @@ pub async fn serve_plugin(
             continue;
         }
 
-        let request: PluginRequest =
-            serde_json::from_str(&line).map_err(|error| BackendError::Internal(error.to_string()))?;
+        let request: PluginRequest = serde_json::from_str(&line)
+            .map_err(|error| BackendError::Internal(error.to_string()))?;
         let response = handle_request(factory.describe(), backend.as_ref(), request).await;
-        let encoded =
-            serde_json::to_string(&response).map_err(|error| BackendError::Internal(error.to_string()))?;
+        let encoded = serde_json::to_string(&response)
+            .map_err(|error| BackendError::Internal(error.to_string()))?;
         writer
             .write_all(encoded.as_bytes())
             .await
@@ -254,7 +265,9 @@ async fn handle_request(
             metadata: descriptor.into(),
         }),
         PluginRequest::HealthCheck => backend.health_check().await.map(|_| PluginResponse::Ok),
-        PluginRequest::CanSatisfy { ir } => backend.can_satisfy(&ir).await.map(|_| PluginResponse::Ok),
+        PluginRequest::CanSatisfy { ir } => {
+            backend.can_satisfy(&ir).await.map(|_| PluginResponse::Ok)
+        }
         PluginRequest::Create { ir } => backend
             .create(&ir)
             .await
@@ -263,17 +276,23 @@ async fn handle_request(
             handle,
             command,
             timeout_ms,
-        } => backend.exec(&handle, &command, timeout_ms).await.map(|result| {
-            PluginResponse::ExecResult {
+        } => backend
+            .exec(&handle, &command, timeout_ms)
+            .await
+            .map(|result| PluginResponse::ExecResult {
                 result: result.into(),
-            }
-        }),
-        PluginRequest::Status { handle } => backend.status(&handle).await.map(|status| {
-            PluginResponse::Status {
-                status: status.into(),
-            }
-        }),
-        PluginRequest::Destroy { handle } => backend.destroy(&handle).await.map(|_| PluginResponse::Ok),
+            }),
+        PluginRequest::Status { handle } => {
+            backend
+                .status(&handle)
+                .await
+                .map(|status| PluginResponse::Status {
+                    status: status.into(),
+                })
+        }
+        PluginRequest::Destroy { handle } => {
+            backend.destroy(&handle).await.map(|_| PluginResponse::Ok)
+        }
     };
 
     match result {

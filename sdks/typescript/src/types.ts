@@ -11,6 +11,15 @@ export interface ExecResult {
   duration_ms: number;
 }
 
+export interface ExecStreamEvent {
+  event: string;
+  chunk?: string;
+  exit_code?: number;
+  duration_ms?: number;
+  sandbox_id?: string;
+  backend?: string;
+}
+
 /** Inspect response for a sandbox (mirrors daemon `InspectResponse`). */
 export interface SandboxInfo {
   sandbox_id: string;
@@ -50,6 +59,8 @@ export interface SandboxConfig {
   secretFiles: Record<string, string>;
   workingDir?: string;
   preferWarm: boolean;
+  backend?: string;
+  extensions?: Record<string, unknown>;
   daemonUrl: string;
   fetch?: typeof fetch;
 }

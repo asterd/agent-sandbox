@@ -133,6 +133,7 @@ pub struct TenantRecord {
     pub id: String,
     pub quota_hourly: i64,
     pub quota_concurrent: i64,
+    pub allowed_backends: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -393,6 +394,7 @@ pub async fn verify_api_key(
         id: row.get("id"),
         quota_hourly: row.get("quota_hourly"),
         quota_concurrent: row.get("quota_concurrent"),
+        allowed_backends: Vec::new(),
     }))
 }
 
@@ -427,6 +429,139 @@ pub async fn consume_hourly_quota(
         return Err(ApiError::rate_limited("quota oraria superata"));
     }
 
+    Ok(())
+}
+
+pub async fn consume_concurrent_slot(
+    pool: &SqlitePool,
+    tenant_id: &str,
+    quota_concurrent: i64,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "INSERT INTO tenant_usage (tenant_id, concurrent_in_use) VALUES (?1, 0) \
+         ON CONFLICT(tenant_id) DO NOTHING",
+    )
+    .bind(tenant_id)
+    .execute(pool)
+    .await?;
+
+    let result = sqlx::query(
+        "UPDATE tenant_usage SET concurrent_in_use = concurrent_in_use + 1 \
+         WHERE tenant_id = ?1 AND concurrent_in_use < ?2",
+    )
+    .bind(tenant_id)
+    .bind(quota_concurrent)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(ApiError::rate_limited("quota concorrente superata"));
+    }
+
+    Ok(())
+}
+
+pub async fn release_concurrent_slot(pool: &SqlitePool, tenant_id: &str) -> Result<(), ApiError> {
+    sqlx::query(
+        "UPDATE tenant_usage \
+         SET concurrent_in_use = CASE \
+             WHEN concurrent_in_use > 0 THEN concurrent_in_use - 1 \
+             ELSE 0 \
+         END \
+         WHERE tenant_id = ?1",
+    )
+    .bind(tenant_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn reconcile_concurrent_usage(pool: &SqlitePool) -> Result<(), ApiError> {
+    let rows = sqlx::query(
+        "SELECT tenant_id, COUNT(*) AS active_count \
+         FROM sandboxes \
+         WHERE tenant_id IS NOT NULL AND status IN ('creating', 'running') \
+         GROUP BY tenant_id",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    sqlx::query("DELETE FROM tenant_usage")
+        .execute(pool)
+        .await?;
+    for row in rows {
+        let tenant_id: String = row.get("tenant_id");
+        let active_count: i64 = row.get("active_count");
+        sqlx::query("INSERT INTO tenant_usage (tenant_id, concurrent_in_use) VALUES (?1, ?2)")
+            .bind(tenant_id)
+            .bind(active_count)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+pub async fn get_tenant_usage(
+    pool: &SqlitePool,
+    tenant_id: &str,
+) -> Result<Option<(i64, i64)>, ApiError> {
+    let window_start = current_window_start(Utc::now());
+    let row = sqlx::query(
+        "SELECT \
+             COALESCE((SELECT concurrent_in_use FROM tenant_usage WHERE tenant_id = ?1), 0) AS concurrent_in_use, \
+             COALESCE((SELECT count FROM rate_limit_windows WHERE tenant_id = ?1 AND window_start = ?2), 0) AS hourly_count",
+    )
+    .bind(tenant_id)
+    .bind(window_start)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|row| {
+        (
+            row.get::<i64, _>("concurrent_in_use"),
+            row.get::<i64, _>("hourly_count"),
+        )
+    }))
+}
+
+pub async fn set_runtime_metadata(
+    pool: &SqlitePool,
+    key: &str,
+    value: &str,
+) -> Result<(), ApiError> {
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO runtime_metadata (key, value, updated_at) VALUES (?1, ?2, ?3) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+    )
+    .bind(key)
+    .bind(value)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn cleanup_old_records(
+    pool: &SqlitePool,
+    audit_retain_days: u64,
+) -> Result<(), ApiError> {
+    let audit_cutoff = (Utc::now() - chrono::Duration::days(audit_retain_days as i64)).to_rfc3339();
+    let rate_limit_cutoff = current_window_start(Utc::now() - chrono::Duration::days(2));
+
+    sqlx::query("DELETE FROM audit_log WHERE ts < ?1")
+        .bind(audit_cutoff)
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM rate_limit_windows WHERE window_start < ?1")
+        .bind(rate_limit_cutoff)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn vacuum(pool: &SqlitePool) -> Result<(), ApiError> {
+    sqlx::query("VACUUM").execute(pool).await?;
     Ok(())
 }
 

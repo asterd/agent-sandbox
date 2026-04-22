@@ -1,5 +1,7 @@
 use crate::{config::BackendsSection, external_backend::ExternalBackend};
-use agentsandbox_sdk::{backend::SandboxBackend, error::BackendError, ir::SandboxIR, plugin::PluginDescriptor};
+use agentsandbox_sdk::{
+    backend::SandboxBackend, error::BackendError, ir::SandboxIR, plugin::PluginDescriptor,
+};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,

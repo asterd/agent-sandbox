@@ -50,6 +50,10 @@ export class BackendUnavailableError extends SandboxError {
   static override readonly code = "BACKEND_UNAVAILABLE";
 }
 
+export class NotSupportedError extends SandboxError {
+  static override readonly code = "NOT_SUPPORTED";
+}
+
 export class ExecTimeoutError extends SandboxError {
   static override readonly code = "EXEC_TIMEOUT";
 }
@@ -67,6 +71,7 @@ const CODE_TO_CLASS: Record<string, typeof SandboxError> = {
   [SandboxExpiredError.code]: SandboxExpiredError,
   [SpecInvalidError.code]: SpecInvalidError,
   [BackendUnavailableError.code]: BackendUnavailableError,
+  [NotSupportedError.code]: NotSupportedError,
   [ExecTimeoutError.code]: ExecTimeoutError,
   [LeaseInvalidError.code]: LeaseInvalidError,
   [InternalDaemonError.code]: InternalDaemonError,

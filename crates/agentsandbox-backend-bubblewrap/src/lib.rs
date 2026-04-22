@@ -11,7 +11,12 @@ use agentsandbox_sdk::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Component, Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+};
 use tempfile::NamedTempFile;
 use tokio::{process::Command, sync::Mutex, time::timeout};
 
@@ -70,6 +75,57 @@ impl BubblewrapBackend {
 
     fn workspace_dir(&self, id: &str) -> PathBuf {
         self.rootfs_base.join(id)
+    }
+
+    fn snapshots_dir(&self) -> PathBuf {
+        self.rootfs_base.join(".snapshots")
+    }
+
+    fn resolve_guest_path(workspace: &Path, path: &str) -> Result<PathBuf, BackendError> {
+        let mut relative = PathBuf::new();
+        for component in Path::new(path).components() {
+            match component {
+                Component::Normal(part) => relative.push(part),
+                Component::CurDir | Component::RootDir => {}
+                Component::ParentDir | Component::Prefix(_) => {
+                    return Err(BackendError::Configuration(
+                        "path file non valido o traversal non consentito".into(),
+                    ))
+                }
+            }
+        }
+        if relative.as_os_str().is_empty() {
+            return Err(BackendError::Configuration("path file vuoto".into()));
+        }
+        Ok(workspace.join(relative))
+    }
+
+    fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), BackendError> {
+        std::fs::create_dir_all(dst)
+            .map_err(|error| BackendError::Internal(format!("mkdir snapshot: {error}")))?;
+        for entry in std::fs::read_dir(src)
+            .map_err(|error| BackendError::Internal(format!("read_dir snapshot: {error}")))?
+        {
+            let entry = entry
+                .map_err(|error| BackendError::Internal(format!("read_dir entry: {error}")))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| BackendError::Internal(format!("file_type: {error}")))?;
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            if file_type.is_dir() {
+                Self::copy_dir_recursive(&src_path, &dst_path)?;
+            } else if file_type.is_file() {
+                if let Some(parent) = dst_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|error| {
+                        BackendError::Internal(format!("mkdir parent: {error}"))
+                    })?;
+                }
+                std::fs::copy(&src_path, &dst_path)
+                    .map_err(|error| BackendError::Internal(format!("copy file: {error}")))?;
+            }
+        }
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
@@ -351,6 +407,70 @@ impl SandboxBackend for BubblewrapBackend {
         let _ = Self::parse_extensions(ir)?;
         Ok(())
     }
+
+    async fn upload_file(
+        &self,
+        handle: &str,
+        path: &str,
+        content: &[u8],
+    ) -> Result<(), BackendError> {
+        let session = self.session(handle).await?;
+        let guest_path = Self::resolve_guest_path(&session.workspace, path)?;
+        if let Some(parent) = guest_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| BackendError::Internal(format!("mkdir upload parent: {error}")))?;
+        }
+        std::fs::write(&guest_path, content)
+            .map_err(|error| BackendError::Internal(format!("write upload file: {error}")))?;
+        Ok(())
+    }
+
+    async fn download_file(&self, handle: &str, path: &str) -> Result<Vec<u8>, BackendError> {
+        let session = self.session(handle).await?;
+        let guest_path = Self::resolve_guest_path(&session.workspace, path)?;
+        std::fs::read(&guest_path).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => BackendError::NotFound(path.into()),
+            _ => BackendError::Internal(format!("read download file: {error}")),
+        })
+    }
+
+    async fn snapshot(&self, handle: &str) -> Result<String, BackendError> {
+        let session = self.session(handle).await?;
+        let snapshot_id = format!(
+            "bubblewrap-{}-{}",
+            handle,
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let snapshot_path = self.snapshots_dir().join(&snapshot_id);
+        Self::copy_dir_recursive(&session.workspace, &snapshot_path)?;
+        Ok(snapshot_id)
+    }
+
+    async fn restore(&self, snapshot_id: &str, ir: &SandboxIR) -> Result<String, BackendError> {
+        let _ = Self::parse_extensions(ir)?;
+        let snapshot_path = self.snapshots_dir().join(snapshot_id);
+        if !snapshot_path.exists() {
+            return Err(BackendError::NotFound(snapshot_id.into()));
+        }
+        std::fs::create_dir_all(&self.rootfs_base)
+            .map_err(|error| BackendError::Internal(format!("rootfs_base mkdir: {error}")))?;
+        let workspace = self.workspace_dir(&ir.id);
+        if workspace.exists() {
+            let _ = std::fs::remove_dir_all(&workspace);
+        }
+        Self::copy_dir_recursive(&snapshot_path, &workspace)?;
+        let now = Utc::now();
+        self.sessions.lock().await.insert(
+            ir.id.clone(),
+            SandboxSession {
+                created_at: now,
+                expires_at: now + Duration::seconds(ir.ttl_seconds as i64),
+                ir: ir.clone(),
+                workspace,
+            },
+        );
+        Ok(ir.id.clone())
+    }
 }
 
 #[cfg(test)]
@@ -378,5 +498,36 @@ mod tests {
         }));
         let error = BubblewrapBackend::parse_extensions(&ir).unwrap_err();
         assert!(error.to_string().contains("extensions.bubblewrap"));
+    }
+
+    #[tokio::test]
+    async fn upload_download_and_snapshot_roundtrip() {
+        let backend = BubblewrapBackend::new("bwrap".into(), default_rootfs_base());
+        let ir = SandboxIR::default_for_test();
+        let handle = backend.create(&ir).await.unwrap();
+        backend
+            .upload_file(&handle, "nested/input.txt", b"hello")
+            .await
+            .unwrap();
+        let content = backend
+            .download_file(&handle, "nested/input.txt")
+            .await
+            .unwrap();
+        assert_eq!(content, b"hello");
+
+        let snapshot_id = backend.snapshot(&handle).await.unwrap();
+        backend.destroy(&handle).await.unwrap();
+
+        let restored_ir = SandboxIR {
+            id: "restored-bwrap".into(),
+            ..SandboxIR::default_for_test()
+        };
+        let restored = backend.restore(&snapshot_id, &restored_ir).await.unwrap();
+        let restored_content = backend
+            .download_file(&restored, "nested/input.txt")
+            .await
+            .unwrap();
+        assert_eq!(restored_content, b"hello");
+        backend.destroy(&restored).await.unwrap();
     }
 }

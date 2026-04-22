@@ -1,0 +1,22 @@
+[Unit]
+Description=AgentSandbox daemon
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agentsandbox
+Group=agentsandbox
+WorkingDirectory=/opt/agentsandbox
+Environment=AS_CONFIG=/etc/agentsandbox/agentsandbox.internal.toml
+ExecStart=/opt/agentsandbox/bin/agentsandbox-daemon
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/agentsandbox /var/log/agentsandbox
+
+[Install]
+WantedBy=multi-user.target

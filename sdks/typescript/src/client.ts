@@ -22,6 +22,7 @@ import {
   LEASE_HEADER,
   type CreateResponse,
   type ExecResult,
+  type ExecStreamEvent,
   type SandboxConfig,
   type SandboxInfo,
   type SandboxOptions,
@@ -48,6 +49,8 @@ export class Sandbox {
       secretFiles: { ...(options.secretFiles ?? {}) },
       workingDir: options.workingDir,
       preferWarm: options.preferWarm ?? false,
+      backend: options.backend,
+      extensions: options.extensions,
       daemonUrl: options.daemonUrl ?? DEFAULT_DAEMON_URL,
       fetch: options.fetch,
     };
@@ -99,6 +102,93 @@ export class Sandbox {
       { method: "GET" },
     );
     return (await this.#handleResponse(response)) as SandboxInfo;
+  }
+
+  async uploadFile(path: string, content: string | Uint8Array): Promise<void> {
+    const id = this.#requireActive();
+    const response = await this.#fetch(
+      `${this.#config.daemonUrl}/v1/sandboxes/${id}/files?path=${encodeURIComponent(path)}`,
+      {
+        method: "POST",
+        headers: { [LEASE_HEADER]: this.#leaseToken ?? "" },
+        body: typeof content === "string" ? new TextEncoder().encode(content) : content,
+      },
+    );
+    await this.#handleResponse(response);
+  }
+
+  async downloadFile(path: string): Promise<Uint8Array> {
+    const id = this.#requireActive();
+    const response = await this.#fetch(
+      `${this.#config.daemonUrl}/v1/sandboxes/${id}/files/${path}`,
+      {
+        method: "GET",
+        headers: { [LEASE_HEADER]: this.#leaseToken ?? "" },
+      },
+    );
+    if (!response.ok) {
+      const { code, message, details } = await parseErrorEnvelope(response);
+      throw exceptionFor(code, message, {
+        details,
+        statusCode: response.status,
+      });
+    }
+    return new Uint8Array(await response.arrayBuffer());
+  }
+
+  async snapshot(): Promise<string> {
+    const id = this.#requireActive();
+    const response = await this.#fetch(
+      `${this.#config.daemonUrl}/v1/sandboxes/${id}/snapshot`,
+      {
+        method: "POST",
+        headers: { [LEASE_HEADER]: this.#leaseToken ?? "" },
+      },
+    );
+    const data = (await this.#handleResponse(response)) as { snapshot_id: string };
+    return data.snapshot_id;
+  }
+
+  async *execStream(command: string): AsyncGenerator<ExecStreamEvent> {
+    const id = this.#requireActive();
+    const response = await this.#fetch(
+      `${this.#config.daemonUrl}/v1/sandboxes/${id}/exec?stream=1`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          [LEASE_HEADER]: this.#leaseToken ?? "",
+        },
+        body: JSON.stringify({ command }),
+      },
+    );
+    if (!response.ok) {
+      const { code, message, details } = await parseErrorEnvelope(response);
+      throw exceptionFor(code, message, {
+        details,
+        statusCode: response.status,
+      });
+    }
+    if (!response.body) {
+      throw new SandboxError("Il runtime fetch non supporta response.body");
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        yield JSON.parse(line) as ExecStreamEvent;
+      }
+    }
+    if (buffer.trim()) {
+      yield JSON.parse(buffer) as ExecStreamEvent;
+    }
   }
 
   /**
@@ -214,6 +304,15 @@ export class Sandbox {
     }
     if (this.#config.preferWarm) {
       specBody.scheduling = { preferWarm: true };
+    }
+    if (this.#config.backend) {
+      specBody.scheduling = {
+        ...(specBody.scheduling as Record<string, unknown> | undefined),
+        backend: this.#config.backend,
+      };
+    }
+    if (this.#config.extensions) {
+      specBody.extensions = this.#config.extensions;
     }
 
     return {

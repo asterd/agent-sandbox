@@ -27,6 +27,7 @@ pub enum ApiErrorCode {
     SpecInvalid,
     Unauthorized,
     RateLimitExceeded,
+    NotSupported,
     BackendUnavailable,
     ExecTimeout,
     LeaseInvalid,
@@ -42,6 +43,7 @@ impl ApiErrorCode {
             ApiErrorCode::SpecInvalid => "SPEC_INVALID",
             ApiErrorCode::Unauthorized => "UNAUTHORIZED",
             ApiErrorCode::RateLimitExceeded => "RATE_LIMIT_EXCEEDED",
+            ApiErrorCode::NotSupported => "NOT_SUPPORTED",
             ApiErrorCode::BackendUnavailable => "BACKEND_UNAVAILABLE",
             ApiErrorCode::ExecTimeout => "EXEC_TIMEOUT",
             ApiErrorCode::LeaseInvalid => "LEASE_INVALID",
@@ -57,6 +59,7 @@ impl ApiErrorCode {
             ApiErrorCode::SpecInvalid => StatusCode::UNPROCESSABLE_ENTITY,
             ApiErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiErrorCode::RateLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
+            ApiErrorCode::NotSupported => StatusCode::NOT_IMPLEMENTED,
             ApiErrorCode::BackendUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             ApiErrorCode::ExecTimeout => StatusCode::GATEWAY_TIMEOUT,
             ApiErrorCode::LeaseInvalid => StatusCode::FORBIDDEN,
@@ -138,9 +141,8 @@ impl From<BackendError> for ApiError {
             BackendError::NotFound(_) => ApiErrorCode::SandboxNotFound,
             BackendError::Unavailable(_) => ApiErrorCode::BackendUnavailable,
             BackendError::Timeout(_) => ApiErrorCode::ExecTimeout,
-            BackendError::NotSupported(_) | BackendError::Configuration(_) => {
-                ApiErrorCode::SpecInvalid
-            }
+            BackendError::NotSupported(_) => ApiErrorCode::NotSupported,
+            BackendError::Configuration(_) => ApiErrorCode::SpecInvalid,
             BackendError::ResourceExhausted(_) => ApiErrorCode::BackendUnavailable,
             BackendError::Internal(_) => ApiErrorCode::InternalError,
         };

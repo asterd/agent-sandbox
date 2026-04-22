@@ -265,6 +265,71 @@ describe("Sandbox.exec", () => {
     expect(headers["X-Lease-Token"]).toBe(LEASE);
   });
 
+  it("supporta uploadFile e downloadFile", async () => {
+    const fetchImpl = lifecycleFetch(async (url, init) => {
+      if (
+        init.method === "POST" &&
+        url === `${DAEMON}/v1/sandboxes/${SANDBOX_ID}/files?path=input.txt`
+      ) {
+        return new Response(null, { status: 204 });
+      }
+      if (
+        init.method === "GET" &&
+        url === `${DAEMON}/v1/sandboxes/${SANDBOX_ID}/files/result.txt`
+      ) {
+        return new Response("ok\n", { status: 200 });
+      }
+      return new Response(null, { status: 404 });
+    });
+
+    const sb = await Sandbox.create({ runtime: "python", fetch: fetchImpl });
+    await sb.uploadFile("input.txt", "payload");
+    const data = await sb.downloadFile("result.txt");
+    await sb.destroy();
+
+    expect(new TextDecoder().decode(data)).toBe("ok\n");
+  });
+
+  it("supporta execStream su NDJSON", async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode(
+            '{"event":"started"}\n{"event":"stdout","chunk":"hi\\n"}\n{"event":"completed","exit_code":0,"duration_ms":7}\n',
+          ),
+        );
+        controller.close();
+      },
+    });
+    const fetchImpl = lifecycleFetch(async (url, init) => {
+      if (
+        init.method === "POST" &&
+        url === `${DAEMON}/v1/sandboxes/${SANDBOX_ID}/exec?stream=1`
+      ) {
+        return new Response(stream, {
+          status: 200,
+          headers: { "Content-Type": "application/x-ndjson" },
+        });
+      }
+      return new Response(null, { status: 404 });
+    });
+
+    const sb = await Sandbox.create({ runtime: "python", fetch: fetchImpl });
+    const events: Array<{ event: string; chunk?: string; exit_code?: number }> = [];
+    for await (const event of sb.execStream("echo hi")) {
+      events.push(event);
+    }
+    await sb.destroy();
+
+    expect(events.map((event) => event.event)).toEqual([
+      "started",
+      "stdout",
+      "completed",
+    ]);
+    expect(events[1]?.chunk).toBe("hi\n");
+    expect(events[2]?.exit_code).toBe(0);
+  });
+
   it("exit_code != 0 non lancia eccezione", async () => {
     const fetchImpl = lifecycleFetch(async () =>
       json(200, { stdout: "", stderr: "nope", exit_code: 42, duration_ms: 1 }),

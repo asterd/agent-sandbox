@@ -1,16 +1,25 @@
 use anyhow::Context;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::Path};
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct DaemonConfig {
     pub daemon: DaemonSection,
     pub database: DatabaseSection,
     pub auth: AuthSection,
     pub backends: BackendsSection,
+    pub limits: LimitsSection,
+    pub audit: AuditSection,
+    pub security: SecuritySection,
+    #[serde(default)]
+    pub tenants: HashMap<String, TenantPolicySection>,
+    #[serde(skip)]
+    pub profile: String,
+    #[serde(skip)]
+    pub source_path: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct DaemonSection {
     pub host: String,
     pub port: u16,
@@ -18,24 +27,51 @@ pub struct DaemonSection {
     pub log_format: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct DatabaseSection {
     pub url: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AuthSection {
     pub mode: AuthMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct LimitsSection {
+    pub max_ttl_seconds: u64,
+    pub default_timeout_ms: u64,
+    pub max_concurrent_sandboxes: u64,
+    pub max_file_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AuditSection {
+    pub emit_security_warnings: bool,
+    pub retain_days: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SecuritySection {
+    pub allow_privileged_extensions: bool,
+    pub require_api_key_non_local: bool,
+    pub trusted_proxy_headers: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub struct TenantPolicySection {
+    #[serde(default)]
+    pub allowed_backends: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMode {
     SingleUser,
     ApiKey,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct BackendsSection {
     #[serde(default)]
     pub enabled: Vec<String>,
@@ -73,7 +109,16 @@ pub fn load_config(path: &str) -> anyhow::Result<DaemonConfig> {
         .set_default("database.url", "sqlite://agentsandbox.db")?
         .set_default("auth.mode", "single_user")?
         .set_default("backends.enabled", Vec::<String>::new())?
-        .set_default("backends.search_dirs", vec!["target/debug".to_string()])?;
+        .set_default("backends.search_dirs", vec!["target/debug".to_string()])?
+        .set_default("limits.max_ttl_seconds", 3600)?
+        .set_default("limits.default_timeout_ms", 30_000)?
+        .set_default("limits.max_concurrent_sandboxes", 50)?
+        .set_default("limits.max_file_bytes", 1_048_576)?
+        .set_default("audit.emit_security_warnings", true)?
+        .set_default("audit.retain_days", 30)?
+        .set_default("security.allow_privileged_extensions", false)?
+        .set_default("security.require_api_key_non_local", true)?
+        .set_default("security.trusted_proxy_headers", true)?;
 
     let config_path = Path::new(path);
     if config_path.exists() {
@@ -86,8 +131,23 @@ pub fn load_config(path: &str) -> anyhow::Result<DaemonConfig> {
 
     let cfg = builder.build()?;
     let mut parsed: DaemonConfig = cfg.try_deserialize()?;
+    parsed.profile = detect_profile(path);
+    parsed.source_path = path.to_string();
     apply_env_overrides(&mut parsed)?;
     Ok(parsed)
+}
+
+fn detect_profile(path: &str) -> String {
+    let filename = Path::new(path)
+        .file_name()
+        .and_then(|item| item.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if filename.contains("internal") {
+        "internal".into()
+    } else {
+        "development".into()
+    }
 }
 
 fn apply_env_overrides(cfg: &mut DaemonConfig) -> anyhow::Result<()> {
@@ -131,6 +191,47 @@ fn apply_env_overrides(cfg: &mut DaemonConfig) -> anyhow::Result<()> {
             .map(ToOwned::to_owned)
             .collect();
     }
+    if let Ok(value) = std::env::var("AS_LIMITS_MAX_TTL_SECONDS") {
+        cfg.limits.max_ttl_seconds = value
+            .parse()
+            .with_context(|| format!("AS_LIMITS_MAX_TTL_SECONDS non valido: {value}"))?;
+    }
+    if let Ok(value) = std::env::var("AS_LIMITS_DEFAULT_TIMEOUT_MS") {
+        cfg.limits.default_timeout_ms = value
+            .parse()
+            .with_context(|| format!("AS_LIMITS_DEFAULT_TIMEOUT_MS non valido: {value}"))?;
+    }
+    if let Ok(value) = std::env::var("AS_LIMITS_MAX_CONCURRENT_SANDBOXES") {
+        cfg.limits.max_concurrent_sandboxes = value
+            .parse()
+            .with_context(|| format!("AS_LIMITS_MAX_CONCURRENT_SANDBOXES non valido: {value}"))?;
+    }
+    if let Ok(value) = std::env::var("AS_LIMITS_MAX_FILE_BYTES") {
+        cfg.limits.max_file_bytes = value
+            .parse()
+            .with_context(|| format!("AS_LIMITS_MAX_FILE_BYTES non valido: {value}"))?;
+    }
+    if let Ok(value) = std::env::var("AS_AUDIT_EMIT_SECURITY_WARNINGS") {
+        cfg.audit.emit_security_warnings =
+            parse_bool_env("AS_AUDIT_EMIT_SECURITY_WARNINGS", &value)?;
+    }
+    if let Ok(value) = std::env::var("AS_AUDIT_RETAIN_DAYS") {
+        cfg.audit.retain_days = value
+            .parse()
+            .with_context(|| format!("AS_AUDIT_RETAIN_DAYS non valido: {value}"))?;
+    }
+    if let Ok(value) = std::env::var("AS_SECURITY_ALLOW_PRIVILEGED_EXTENSIONS") {
+        cfg.security.allow_privileged_extensions =
+            parse_bool_env("AS_SECURITY_ALLOW_PRIVILEGED_EXTENSIONS", &value)?;
+    }
+    if let Ok(value) = std::env::var("AS_SECURITY_REQUIRE_API_KEY_NON_LOCAL") {
+        cfg.security.require_api_key_non_local =
+            parse_bool_env("AS_SECURITY_REQUIRE_API_KEY_NON_LOCAL", &value)?;
+    }
+    if let Ok(value) = std::env::var("AS_SECURITY_TRUSTED_PROXY_HEADERS") {
+        cfg.security.trusted_proxy_headers =
+            parse_bool_env("AS_SECURITY_TRUSTED_PROXY_HEADERS", &value)?;
+    }
 
     for (key, value) in std::env::vars() {
         let Some(rest) = key.strip_prefix("AS_BACKENDS_") else {
@@ -154,6 +255,14 @@ fn apply_env_overrides(cfg: &mut DaemonConfig) -> anyhow::Result<()> {
             .insert(config_key, value);
     }
     Ok(())
+}
+
+fn parse_bool_env(key: &str, value: &str) -> anyhow::Result<bool> {
+    match value {
+        "1" | "true" | "TRUE" | "yes" | "YES" => Ok(true),
+        "0" | "false" | "FALSE" | "no" | "NO" => Ok(false),
+        _ => anyhow::bail!("{key} non valido: {value}"),
+    }
 }
 
 #[cfg(test)]
@@ -385,7 +494,10 @@ enabled = ["docker"]
         assert_eq!(cfg.backends.enabled, vec!["docker", "gvisor", "podman"]);
         assert_eq!(
             cfg.backends.search_dirs,
-            vec!["target/debug", "/Users/example/.local/lib/agentsandbox/plugins"]
+            vec![
+                "target/debug",
+                "/Users/example/.local/lib/agentsandbox/plugins"
+            ]
         );
         assert_eq!(
             cfg.backends

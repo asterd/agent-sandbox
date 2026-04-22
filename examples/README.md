@@ -10,6 +10,7 @@ This directory contains runnable examples against a local `agentsandbox-daemon`.
 | [02-code-review-agent](02-code-review-agent/README.md) | Python | An OpenAI-compatible model reviews a Python file, then the fixed code runs in a sandbox | Yes |
 | [03-dependency-auditor](03-dependency-auditor/README.md) | TypeScript | `npm audit` inside a sandbox plus a short OpenAI-compatible summary | Yes |
 | [04-multi-backend-demo](04-multi-backend-demo/README.md) | Python | The same workload executed on every available Python-capable backend | No |
+| [05-file-stream-demo](05-file-stream-demo/README.md) | Python | Upload, NDJSON exec stream, download, and normal teardown | No |
 
 ## Common prerequisites
 

@@ -5,12 +5,13 @@
 //! status-code mapping; handlers never call `StatusCode` directly.
 
 use agentsandbox_core::compile_value;
-use agentsandbox_sdk::{backend::SandboxState, plugin::PluginCapabilities};
 use agentsandbox_sdk::error::BackendError;
+use agentsandbox_sdk::{backend::SandboxState, plugin::PluginCapabilities};
 use axum::{
+    body::Body,
     extract::{Extension, Path, Query, State},
-    http::{header, HeaderMap},
-    response::IntoResponse,
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -52,6 +53,51 @@ pub async fn metrics(State(state): State<SharedState>) -> impl IntoResponse {
         )],
         state.metrics.to_prometheus(),
     )
+}
+
+#[derive(Serialize)]
+pub struct RuntimeInfoResponse {
+    pub daemon_version: String,
+    pub config_profile: String,
+    pub available_backends: Vec<String>,
+    pub auth_mode: String,
+    pub db_path: String,
+    pub config_path: String,
+    pub limits: RuntimeLimitsResponse,
+}
+
+#[derive(Serialize)]
+pub struct RuntimeLimitsResponse {
+    pub max_ttl_seconds: u64,
+    pub default_timeout_ms: u64,
+    pub max_concurrent_sandboxes: u64,
+    pub max_file_bytes: u64,
+}
+
+pub async fn runtime_info(State(state): State<SharedState>) -> Json<RuntimeInfoResponse> {
+    let available_backends = state
+        .registry
+        .list_available()
+        .into_iter()
+        .map(|descriptor| descriptor.id.clone())
+        .collect();
+    Json(RuntimeInfoResponse {
+        daemon_version: env!("CARGO_PKG_VERSION").into(),
+        config_profile: state.config.profile.clone(),
+        available_backends,
+        auth_mode: match state.config.auth.mode {
+            crate::config::AuthMode::SingleUser => "single_user".into(),
+            crate::config::AuthMode::ApiKey => "api_key".into(),
+        },
+        db_path: state.config.database.url.clone(),
+        config_path: state.config.source_path.clone(),
+        limits: RuntimeLimitsResponse {
+            max_ttl_seconds: state.config.limits.max_ttl_seconds,
+            default_timeout_ms: state.config.limits.default_timeout_ms,
+            max_concurrent_sandboxes: state.config.limits.max_concurrent_sandboxes,
+            max_file_bytes: state.config.limits.max_file_bytes,
+        },
+    })
 }
 
 #[derive(Serialize)]
@@ -220,16 +266,63 @@ fn extensions_request_privileged(backend_id: &str, extensions: Option<&Value>) -
     extensions.pointer(pointer).and_then(Value::as_bool) == Some(true)
 }
 
+fn enforce_create_limits(
+    state: &SharedState,
+    auth: &AuthContext,
+    backend_id: &str,
+    ir: &agentsandbox_sdk::ir::SandboxIR,
+) -> Result<(), ApiError> {
+    if ir.ttl_seconds > state.config.limits.max_ttl_seconds {
+        return Err(ApiError::spec_invalid(format!(
+            "ttl_seconds supera il limite consentito ({})",
+            state.config.limits.max_ttl_seconds
+        )));
+    }
+
+    if let Some(allowed_backends) = auth.allowed_backends() {
+        if !allowed_backends.is_empty() && !allowed_backends.iter().any(|item| item == backend_id) {
+            return Err(ApiError::unauthorized(format!(
+                "backend {backend_id} non consentito per il tenant"
+            )));
+        }
+    }
+
+    if extensions_request_privileged(backend_id, ir.extensions.as_ref())
+        && !state.config.security.allow_privileged_extensions
+    {
+        return Err(ApiError::spec_invalid(
+            "privileged=true e' disabilitato da security.allow_privileged_extensions",
+        ));
+    }
+
+    Ok(())
+}
+
+async fn reserve_tenant_capacity(state: &SharedState, auth: &AuthContext) -> Result<(), ApiError> {
+    if let (Some(tenant_id), Some(concurrent_quota)) = (auth.tenant_id(), auth.concurrent_quota()) {
+        store::consume_concurrent_slot(&state.db, tenant_id, concurrent_quota).await?;
+    }
+    if let (Some(tenant_id), Some(hourly_quota)) = (auth.tenant_id(), auth.hourly_quota()) {
+        if let Err(error) = store::consume_hourly_quota(&state.db, tenant_id, hourly_quota).await {
+            let _ = store::release_concurrent_slot(&state.db, tenant_id).await;
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+async fn release_tenant_capacity(state: &SharedState, auth: &AuthContext) {
+    if let Some(tenant_id) = auth.tenant_id() {
+        let _ = store::release_concurrent_slot(&state.db, tenant_id).await;
+    }
+}
+
 pub async fn create_sandbox(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<(axum::http::StatusCode, Json<CreateResponse>), ApiError> {
-    if let (Some(tenant_id), Some(hourly_quota)) = (auth.tenant_id(), auth.hourly_quota()) {
-        store::consume_hourly_quota(&state.db, tenant_id, hourly_quota).await?;
-    }
-
     let raw_spec = parse_spec_body(&headers, &body)?;
     // Keep the original submission for audit — reserialise as JSON so the
     // DB column format stays stable even when clients sent YAML.
@@ -243,6 +336,7 @@ pub async fn create_sandbox(
             e.to_string(),
         )
     })?;
+    enforce_create_limits(&state, &auth, &backend_id, &ir)?;
     if let (Some(extensions), Some(descriptor)) = (
         ir.extensions.as_ref(),
         state.registry.available_descriptor(&backend_id),
@@ -252,8 +346,9 @@ pub async fn create_sandbox(
         }
     }
     backend.can_satisfy(&ir).await?;
+    reserve_tenant_capacity(&state, &auth).await?;
 
-    let row = store::insert_sandbox(
+    let row = match store::insert_sandbox(
         &state.db,
         store::NewSandbox {
             id: &ir.id,
@@ -265,7 +360,14 @@ pub async fn create_sandbox(
             ttl_seconds: ir.ttl_seconds,
         },
     )
-    .await?;
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            release_tenant_capacity(&state, &auth).await;
+            return Err(error);
+        }
+    };
 
     // Create the actual backend resource. On failure, mark the DB row as
     // error and surface the adapter error. We don't delete the row: the
@@ -298,6 +400,7 @@ pub async fn create_sandbox(
             }
         }
         Err(e) => {
+            release_tenant_capacity(&state, &auth).await;
             let msg = e.to_string();
             store::set_status(&state.db, &ir.id, SandboxState::Failed(msg.clone())).await?;
             state.metrics.backend_error();
@@ -388,6 +491,9 @@ async fn cleanup_after_persist_failure(
         )
         .await;
     }
+    if let Some(tenant_id) = tenant_id {
+        let _ = store::release_concurrent_slot(&state.db, tenant_id).await;
+    }
 
     let message = error.to_string();
     if let Err(status_error) = store::set_status(
@@ -459,6 +565,8 @@ async fn refresh_runtime_status(
         Ok(info) => {
             let observed_status = status_from_backend(info.state);
             if observed_status != row.status {
+                let should_release_slot =
+                    matches!(observed_status.as_str(), "stopped" | "expired" | "error");
                 store::set_status(
                     &state.db,
                     &row.id,
@@ -471,6 +579,11 @@ async fn refresh_runtime_status(
                     },
                 )
                 .await?;
+                if should_release_slot {
+                    if let Some(tenant_id) = row.tenant_id.as_deref() {
+                        store::release_concurrent_slot(&state.db, tenant_id).await?;
+                    }
+                }
             }
             Ok(SandboxRow {
                 status: observed_status,
@@ -479,6 +592,9 @@ async fn refresh_runtime_status(
         }
         Err(BackendError::NotFound(_)) => {
             store::set_status(&state.db, &row.id, SandboxState::Stopped).await?;
+            if let Some(tenant_id) = row.tenant_id.as_deref() {
+                store::release_concurrent_slot(&state.db, tenant_id).await?;
+            }
             Ok(SandboxRow {
                 status: "stopped".into(),
                 ..row
@@ -567,6 +683,12 @@ pub struct ExecRequest {
     pub command: String,
 }
 
+#[derive(Deserialize, Default)]
+pub struct ExecParams {
+    #[serde(default)]
+    pub stream: bool,
+}
+
 #[derive(Serialize)]
 pub struct ExecResponse {
     pub stdout: String,
@@ -602,9 +724,10 @@ pub async fn exec_sandbox(
     State(state): State<SharedState>,
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
+    Query(params): Query<ExecParams>,
     headers: HeaderMap,
     Json(req): Json<ExecRequest>,
-) -> Result<Json<ExecResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     require_lease(&state, &auth, &id, &headers).await?;
 
     let row = store::get_sandbox_scoped(&state.db, &id, access_scope(&auth))
@@ -628,7 +751,14 @@ pub async fn exec_sandbox(
         AuditEvent::exec_started(&id, row.tenant_id.as_deref(), &row.backend, &req.command),
     )
     .await;
-    let result = match backend.exec(row.runtime_handle(), &req.command, None).await {
+    let result = match backend
+        .exec(
+            row.runtime_handle(),
+            &req.command,
+            Some(state.config.limits.default_timeout_ms),
+        )
+        .await
+    {
         Ok(result) => result,
         Err(error) => {
             state.metrics.backend_error();
@@ -658,11 +788,235 @@ pub async fn exec_sandbox(
     )
     .await;
 
+    if params.stream {
+        let mut response = Response::new(Body::from(
+            vec![
+                json!({"event":"started","sandbox_id":id,"backend":row.backend}),
+                json!({"event":"stdout","chunk":result.stdout}),
+                json!({"event":"stderr","chunk":result.stderr}),
+                json!({"event":"completed","exit_code":result.exit_code,"duration_ms":result.duration_ms}),
+            ]
+            .into_iter()
+            .map(|item| serde_json::to_string(&item).expect("NDJSON valido"))
+            .collect::<Vec<_>>()
+            .join("\n")
+                + "\n",
+        ));
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/x-ndjson"),
+        );
+        return Ok(response);
+    }
+
     Ok(Json(ExecResponse {
         stdout: result.stdout,
         stderr: result.stderr,
         exit_code: result.exit_code,
         duration_ms: result.duration_ms,
+    })
+    .into_response())
+}
+
+#[derive(Deserialize)]
+pub struct UploadParams {
+    pub path: String,
+}
+
+#[derive(Serialize)]
+pub struct SnapshotResponse {
+    pub snapshot_id: String,
+}
+
+#[derive(Deserialize)]
+pub struct RestoreRequest {
+    pub snapshot_id: String,
+    pub spec: Value,
+}
+
+#[derive(Serialize)]
+pub struct TenantUsageResponse {
+    pub tenant_id: String,
+    pub hourly_count: i64,
+    pub hourly_quota: i64,
+    pub concurrent_in_use: i64,
+    pub concurrent_quota: i64,
+}
+
+pub async fn upload_file(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+    Query(params): Query<UploadParams>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<StatusCode, ApiError> {
+    require_lease(&state, &auth, &id, &headers).await?;
+    if body.len() as u64 > state.config.limits.max_file_bytes {
+        return Err(ApiError::spec_invalid(format!(
+            "file supera il limite consentito ({} bytes)",
+            state.config.limits.max_file_bytes
+        )));
+    }
+
+    let row = store::get_sandbox_scoped(&state.db, &id, access_scope(&auth))
+        .await?
+        .ok_or_else(|| ApiError::not_found(&id))?;
+    let backend = state.registry.get(&row.backend).map_err(|e| {
+        ApiError::new(
+            crate::error::ApiErrorCode::BackendUnavailable,
+            e.to_string(),
+        )
+    })?;
+    backend
+        .upload_file(row.runtime_handle(), &params.path, &body)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn download_file(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Path((id, path)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    require_lease(&state, &auth, &id, &headers).await?;
+    let row = store::get_sandbox_scoped(&state.db, &id, access_scope(&auth))
+        .await?
+        .ok_or_else(|| ApiError::not_found(&id))?;
+    let backend = state.registry.get(&row.backend).map_err(|e| {
+        ApiError::new(
+            crate::error::ApiErrorCode::BackendUnavailable,
+            e.to_string(),
+        )
+    })?;
+    let content = backend.download_file(row.runtime_handle(), &path).await?;
+    let mut response = Response::new(Body::from(content));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    Ok(response)
+}
+
+pub async fn snapshot_sandbox(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<SnapshotResponse>, ApiError> {
+    require_lease(&state, &auth, &id, &headers).await?;
+    let row = store::get_sandbox_scoped(&state.db, &id, access_scope(&auth))
+        .await?
+        .ok_or_else(|| ApiError::not_found(&id))?;
+    let backend = state.registry.get(&row.backend).map_err(|e| {
+        ApiError::new(
+            crate::error::ApiErrorCode::BackendUnavailable,
+            e.to_string(),
+        )
+    })?;
+    let snapshot_id = backend.snapshot(row.runtime_handle()).await?;
+    Ok(Json(SnapshotResponse { snapshot_id }))
+}
+
+pub async fn restore_sandbox(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<RestoreRequest>,
+) -> Result<(StatusCode, Json<CreateResponse>), ApiError> {
+    let ir = compile_value(req.spec.clone())?;
+    let (backend_id, backend) = state.registry.select(&ir).await.map_err(|e| {
+        ApiError::new(
+            crate::error::ApiErrorCode::BackendUnavailable,
+            e.to_string(),
+        )
+    })?;
+    enforce_create_limits(&state, &auth, &backend_id, &ir)?;
+    reserve_tenant_capacity(&state, &auth).await?;
+
+    let lease_token = uuid::Uuid::new_v4().to_string();
+    let spec_json = serde_json::to_string(&req.spec)?;
+    let row = match store::insert_sandbox(
+        &state.db,
+        store::NewSandbox {
+            id: &ir.id,
+            tenant_id: auth.tenant_id(),
+            lease_token: &lease_token,
+            backend: &backend_id,
+            spec_json: &spec_json,
+            ir: &ir,
+            ttl_seconds: ir.ttl_seconds,
+        },
+    )
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            release_tenant_capacity(&state, &auth).await;
+            return Err(error);
+        }
+    };
+
+    match backend.restore(&req.snapshot_id, &ir).await {
+        Ok(handle) => {
+            persist_created_sandbox(
+                &state,
+                &backend,
+                &backend_id,
+                &ir.id,
+                &handle,
+                auth.tenant_id(),
+                ir.ttl_seconds,
+            )
+            .await?;
+        }
+        Err(error) => {
+            release_tenant_capacity(&state, &auth).await;
+            store::set_status(&state.db, &ir.id, SandboxState::Failed(error.to_string())).await?;
+            return Err(error.into());
+        }
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateResponse {
+            sandbox_id: row.id,
+            lease_token: row.lease_token,
+            status: "running".into(),
+            expires_at: row.expires_at.to_rfc3339(),
+            backend: backend_id,
+        }),
+    ))
+}
+
+pub async fn inspect_tenant_usage(
+    State(state): State<SharedState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+) -> Result<Json<TenantUsageResponse>, ApiError> {
+    match &auth {
+        AuthContext::Tenant(tenant) if tenant.id != id => {
+            return Err(ApiError::unauthorized("tenant usage accesso negato"));
+        }
+        _ => {}
+    }
+
+    let tenant = sqlx::query(
+        "SELECT id, quota_hourly, quota_concurrent FROM tenants WHERE id = ?1 AND enabled = 1",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::unauthorized("tenant non trovato o non attivo"))?;
+    let (concurrent_in_use, hourly_count) = store::get_tenant_usage(&state.db, &id)
+        .await?
+        .unwrap_or((0, 0));
+    Ok(Json(TenantUsageResponse {
+        tenant_id: id,
+        hourly_count,
+        hourly_quota: sqlx::Row::get(&tenant, "quota_hourly"),
+        concurrent_in_use,
+        concurrent_quota: sqlx::Row::get(&tenant, "quota_concurrent"),
     }))
 }
 
@@ -707,6 +1061,11 @@ pub async fn destroy_sandbox(
         }
         let was_active = matches!(row.status.as_str(), "creating" | "running");
         store::delete_sandbox(&state.db, &id).await?;
+        if was_active {
+            if let Some(tenant_id) = row.tenant_id.as_deref() {
+                store::release_concurrent_slot(&state.db, tenant_id).await?;
+            }
+        }
         state.metrics.sandbox_destroyed(was_active);
         audit::record(
             &state.db,
@@ -750,7 +1109,8 @@ mod tests {
 
     use crate::{
         config::{
-            AuthMode, AuthSection, BackendsSection, DaemonConfig, DaemonSection, DatabaseSection,
+            AuditSection, AuthMode, AuthSection, BackendsSection, DaemonConfig, DaemonSection,
+            DatabaseSection, LimitsSection, SecuritySection,
         },
         metrics::Metrics,
         registry::BackendRegistry,
@@ -1001,6 +1361,24 @@ mod tests {
                 search_dirs: vec!["target/debug".into()],
                 plugin_config: HashMap::new(),
             },
+            limits: LimitsSection {
+                max_ttl_seconds: 3600,
+                default_timeout_ms: 30_000,
+                max_concurrent_sandboxes: 50,
+                max_file_bytes: 1_048_576,
+            },
+            audit: AuditSection {
+                emit_security_warnings: true,
+                retain_days: 30,
+            },
+            security: SecuritySection {
+                allow_privileged_extensions: false,
+                require_api_key_non_local: true,
+                trusted_proxy_headers: true,
+            },
+            tenants: HashMap::new(),
+            profile: "test".into(),
+            source_path: "inline".into(),
         }
     }
 
@@ -1495,7 +1873,7 @@ mod tests {
     #[tokio::test]
     async fn create_sandbox_audits_privileged_extension_request() {
         let db = test_db().await;
-        let (state, _, _) = test_state_for_backend_with_schema(
+        let (mut state, _, _) = test_state_for_backend_with_schema(
             db.clone(),
             InspectBehavior::Status(SandboxState::Running),
             "docker",
@@ -1504,6 +1882,11 @@ mod tests {
             )),
         )
         .await;
+        Arc::get_mut(&mut state)
+            .unwrap()
+            .config
+            .security
+            .allow_privileged_extensions = true;
         let app = router::build(state);
 
         let response = app

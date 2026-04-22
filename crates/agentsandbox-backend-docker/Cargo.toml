@@ -12,10 +12,12 @@ agentsandbox-sdk = { path = "../agentsandbox-sdk" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 bollard = { workspace = true }
+bytes = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tar = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 

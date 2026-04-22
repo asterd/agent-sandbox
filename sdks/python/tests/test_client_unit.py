@@ -114,6 +114,50 @@ async def test_exec_nonzero_exit_is_not_an_exception():
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_upload_and_download_file_roundtrip():
+    _mock_lifecycle()
+    upload_route = respx.post(f"{DAEMON}/v1/sandboxes/{SANDBOX_ID}/files").mock(
+        return_value=httpx.Response(204)
+    )
+    download_route = respx.get(
+        f"{DAEMON}/v1/sandboxes/{SANDBOX_ID}/files/result.txt"
+    ).mock(return_value=httpx.Response(200, content=b"ok\n"))
+
+    async with Sandbox(runtime="python") as sb:
+        await sb.upload_file("input.txt", b"payload")
+        content = await sb.download_file("result.txt")
+
+    assert upload_route.called
+    assert upload_route.calls.last.request.url.params["path"] == "input.txt"
+    assert upload_route.calls.last.request.headers["X-Lease-Token"] == LEASE
+    assert download_route.called
+    assert content == b"ok\n"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_exec_stream_yields_ndjson_events():
+    _mock_lifecycle()
+    respx.post(f"{DAEMON}/v1/sandboxes/{SANDBOX_ID}/exec").mock(
+        return_value=httpx.Response(
+            200,
+            text='{"event":"started","sandbox_id":"sb-1"}\n'
+            '{"event":"stdout","chunk":"hello\\n"}\n'
+            '{"event":"completed","exit_code":0,"duration_ms":12}\n',
+            headers={"Content-Type": "application/x-ndjson"},
+        )
+    )
+
+    async with Sandbox(runtime="python") as sb:
+        events = [event async for event in sb.exec_stream("echo hello")]
+
+    assert [event.event for event in events] == ["started", "stdout", "completed"]
+    assert events[1].chunk == "hello\n"
+    assert events[2].exit_code == 0
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_inspect_returns_sandbox_info():
     _mock_lifecycle()
     respx.get(f"{DAEMON}/v1/sandboxes/{SANDBOX_ID}").mock(

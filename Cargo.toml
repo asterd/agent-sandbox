@@ -43,6 +43,8 @@ config = { version = "0.14", features = ["toml", "yaml"] }
 tempfile = "3"
 wasmtime = "36.0.7"
 sha2 = "0.10"
+tar = "0.4"
+bytes = "1"
 
 [profile.release]
 lto = "thin"

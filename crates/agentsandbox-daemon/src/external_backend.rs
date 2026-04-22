@@ -175,7 +175,10 @@ impl ExternalBackend {
 #[async_trait]
 impl SandboxBackend for ExternalBackend {
     async fn create(&self, ir: &SandboxIR) -> Result<String, BackendError> {
-        match self.request(PluginRequest::Create { ir: ir.clone() }).await? {
+        match self
+            .request(PluginRequest::Create { ir: ir.clone() })
+            .await?
+        {
             PluginResponse::Created { handle } => Ok(handle),
             PluginResponse::Error { error } => Err(error),
             other => Err(BackendError::Internal(format!(
@@ -252,7 +255,10 @@ impl SandboxBackend for ExternalBackend {
     }
 
     async fn can_satisfy(&self, ir: &SandboxIR) -> Result<(), BackendError> {
-        match self.request(PluginRequest::CanSatisfy { ir: ir.clone() }).await? {
+        match self
+            .request(PluginRequest::CanSatisfy { ir: ir.clone() })
+            .await?
+        {
             PluginResponse::Ok => Ok(()),
             PluginResponse::Error { error } => Err(error),
             other => Err(BackendError::Internal(format!(

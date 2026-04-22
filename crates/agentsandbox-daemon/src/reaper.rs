@@ -88,8 +88,24 @@ pub async fn sweep(state: &SharedState) -> Result<usize, crate::error::ApiError>
             agentsandbox_sdk::backend::SandboxState::Stopped,
         )
         .await?;
+        if let Some(tenant_id) = row_tenant_id(&state.db, &id).await? {
+            store::release_concurrent_slot(&state.db, &tenant_id).await?;
+        }
+    }
+    store::cleanup_old_records(&state.db, state.config.audit.retain_days).await?;
+    if !state.config.database.url.contains(":memory:") {
+        let _ = store::vacuum(&state.db).await;
     }
     Ok(count)
+}
+
+async fn row_tenant_id(
+    pool: &sqlx::SqlitePool,
+    id: &str,
+) -> Result<Option<String>, crate::error::ApiError> {
+    Ok(store::get_sandbox(pool, id)
+        .await?
+        .and_then(|row| row.tenant_id))
 }
 
 #[cfg(test)]
@@ -115,7 +131,8 @@ mod tests {
 
     use crate::{
         config::{
-            AuthMode, AuthSection, BackendsSection, DaemonConfig, DaemonSection, DatabaseSection,
+            AuditSection, AuthMode, AuthSection, BackendsSection, DaemonConfig, DaemonSection,
+            DatabaseSection, LimitsSection, SecuritySection,
         },
         metrics::Metrics,
         registry::BackendRegistry,
@@ -286,6 +303,24 @@ mod tests {
                     search_dirs: vec!["target/debug".into()],
                     plugin_config: HashMap::new(),
                 },
+                limits: LimitsSection {
+                    max_ttl_seconds: 3600,
+                    default_timeout_ms: 30_000,
+                    max_concurrent_sandboxes: 50,
+                    max_file_bytes: 1_048_576,
+                },
+                audit: AuditSection {
+                    emit_security_warnings: true,
+                    retain_days: 30,
+                },
+                security: SecuritySection {
+                    allow_privileged_extensions: false,
+                    require_api_key_non_local: true,
+                    trusted_proxy_headers: true,
+                },
+                tenants: HashMap::new(),
+                profile: "test".into(),
+                source_path: "inline".into(),
             },
             registry: Arc::new(registry),
             metrics: Metrics::new(),

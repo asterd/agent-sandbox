@@ -1,0 +1,33 @@
+[daemon]
+host = "0.0.0.0"
+port = 7847
+log_level = "info"
+log_format = "json"
+
+[database]
+url = "sqlite:///var/lib/agentsandbox/agentsandbox.db"
+
+[auth]
+mode = "api_key"
+
+[backends]
+enabled = ["docker", "podman"]
+search_dirs = ["/opt/agentsandbox/plugins"]
+
+[limits]
+max_ttl_seconds = 3600
+default_timeout_ms = 30000
+max_concurrent_sandboxes = 50
+max_file_bytes = 1048576
+
+[audit]
+emit_security_warnings = true
+retain_days = 30
+
+[security]
+allow_privileged_extensions = false
+require_api_key_non_local = true
+trusted_proxy_headers = true
+
+[tenants.default]
+allowed_backends = ["docker"]

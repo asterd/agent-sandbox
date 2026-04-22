@@ -10,8 +10,8 @@ use agentsandbox_sdk::{
 };
 use async_trait::async_trait;
 use bollard::container::{
-    Config, CreateContainerOptions, InspectContainerOptions, LogOutput, RemoveContainerOptions,
-    StartContainerOptions,
+    Config, CreateContainerOptions, DownloadFromContainerOptions, InspectContainerOptions,
+    LogOutput, RemoveContainerOptions, StartContainerOptions, UploadToContainerOptions,
 };
 use bollard::errors::Error as BollardError;
 use bollard::exec::{CreateExecOptions, StartExecResults};
@@ -19,7 +19,12 @@ use bollard::models::{DeviceMapping, HostConfig, ResourcesUlimits};
 use bollard::Docker;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    io::{Cursor, Read},
+    sync::Mutex,
+};
+use tar::{Archive, Builder, Header};
 use tokio::time::{timeout, Duration};
 
 const CONTAINER_NAME_PREFIX: &str = "agentsandbox-";
@@ -512,6 +517,119 @@ impl SandboxBackend for DockerBackend {
             .map(|_| ())
             .map_err(|e| BackendError::Unavailable(e.to_string()))
     }
+
+    async fn upload_file(
+        &self,
+        handle: &str,
+        path: &str,
+        content: &[u8],
+    ) -> Result<(), BackendError> {
+        let archive = build_tar_archive(path, content)?;
+        match self
+            .client
+            .upload_to_container(
+                handle,
+                Some(UploadToContainerOptions {
+                    path: "/",
+                    ..Default::default()
+                }),
+                bytes::Bytes::from(archive.clone()),
+            )
+            .await
+            .map_err(|error| Self::map_missing(error, handle))
+        {
+            Ok(()) => Ok(()),
+            Err(BackendError::NotFound(_)) => {
+                let Some(legacy_name) = Self::legacy_container_name(handle) else {
+                    return Err(BackendError::NotFound(handle.to_string()));
+                };
+                self.client
+                    .upload_to_container(
+                        &legacy_name,
+                        Some(UploadToContainerOptions {
+                            path: "/",
+                            ..Default::default()
+                        }),
+                        bytes::Bytes::from(archive),
+                    )
+                    .await
+                    .map_err(|error| Self::map_missing(error, handle))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn download_file(&self, handle: &str, path: &str) -> Result<Vec<u8>, BackendError> {
+        let mut stream = self
+            .client
+            .download_from_container(handle, Some(DownloadFromContainerOptions { path }));
+        let mut archive_bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(chunk) => archive_bytes.extend_from_slice(&chunk),
+                Err(error) => match Self::map_missing(error, handle) {
+                    BackendError::NotFound(_) => {
+                        let Some(legacy_name) = Self::legacy_container_name(handle) else {
+                            return Err(BackendError::NotFound(handle.to_string()));
+                        };
+                        let mut legacy_stream = self.client.download_from_container(
+                            &legacy_name,
+                            Some(DownloadFromContainerOptions { path }),
+                        );
+                        let mut legacy_bytes = Vec::new();
+                        while let Some(legacy_chunk) = legacy_stream.next().await {
+                            let legacy_chunk =
+                                legacy_chunk.map_err(|error| Self::map_missing(error, handle))?;
+                            legacy_bytes.extend_from_slice(&legacy_chunk);
+                        }
+                        return extract_file_from_archive(&legacy_bytes);
+                    }
+                    other => return Err(other),
+                },
+            }
+        }
+        extract_file_from_archive(&archive_bytes)
+    }
+}
+
+fn build_tar_archive(path: &str, content: &[u8]) -> Result<Vec<u8>, BackendError> {
+    let normalized = path.trim_start_matches('/');
+    if normalized.is_empty() {
+        return Err(BackendError::Configuration("path file vuoto".into()));
+    }
+
+    let mut builder = Builder::new(Vec::new());
+    let mut header = Header::new_gnu();
+    header.set_size(content.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, normalized, Cursor::new(content))
+        .map_err(|error| BackendError::Internal(error.to_string()))?;
+    builder
+        .into_inner()
+        .map_err(|error| BackendError::Internal(error.to_string()))
+}
+
+fn extract_file_from_archive(archive_bytes: &[u8]) -> Result<Vec<u8>, BackendError> {
+    let mut archive = Archive::new(Cursor::new(archive_bytes));
+    let entries = archive
+        .entries()
+        .map_err(|error| BackendError::Internal(error.to_string()))?;
+    for entry in entries {
+        let mut entry = entry.map_err(|error| BackendError::Internal(error.to_string()))?;
+        if entry.header().entry_type().is_dir() {
+            continue;
+        }
+        let mut out = Vec::new();
+        entry
+            .read_to_end(&mut out)
+            .map_err(|error| BackendError::Internal(error.to_string()))?;
+        return Ok(out);
+    }
+    Err(BackendError::NotFound(
+        "file non trovato nell'archivio".into(),
+    ))
 }
 
 #[cfg(test)]

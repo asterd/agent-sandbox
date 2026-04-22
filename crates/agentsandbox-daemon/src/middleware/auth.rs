@@ -24,9 +24,12 @@ pub async fn auth_middleware(
                 .and_then(|v| v.to_str().ok())
                 .ok_or_else(|| ApiError::unauthorized("X-API-Key richiesta"))?;
 
-            let tenant = store::verify_api_key(&state.db, key)
+            let mut tenant = store::verify_api_key(&state.db, key)
                 .await?
                 .ok_or_else(|| ApiError::unauthorized("API key non valida"))?;
+            if let Some(policy) = state.config.tenants.get(&tenant.id) {
+                tenant.allowed_backends = policy.allowed_backends.clone();
+            }
             AuthContext::tenant(tenant)
         }
     };

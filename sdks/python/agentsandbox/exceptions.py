@@ -62,6 +62,12 @@ class BackendUnavailableError(SandboxError):
     code = "BACKEND_UNAVAILABLE"
 
 
+class NotSupportedError(SandboxError):
+    """Daemon returned 501 / ``NOT_SUPPORTED``."""
+
+    code = "NOT_SUPPORTED"
+
+
 class ExecTimeoutError(SandboxError):
     """Daemon returned 504 / ``EXEC_TIMEOUT``."""
 
@@ -85,6 +91,7 @@ _CODE_TO_EXC: dict[str, type[SandboxError]] = {
     SandboxExpiredError.code: SandboxExpiredError,
     SpecInvalidError.code: SpecInvalidError,
     BackendUnavailableError.code: BackendUnavailableError,
+    NotSupportedError.code: NotSupportedError,
     ExecTimeoutError.code: ExecTimeoutError,
     LeaseInvalidError.code: LeaseInvalidError,
     InternalDaemonError.code: InternalDaemonError,
@@ -114,6 +121,7 @@ __all__ = [
     "SandboxExpiredError",
     "SpecInvalidError",
     "BackendUnavailableError",
+    "NotSupportedError",
     "ExecTimeoutError",
     "LeaseInvalidError",
     "InternalDaemonError",
