@@ -1,6 +1,6 @@
 use anyhow::Context;
 use serde::Deserialize;
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct DaemonConfig {
@@ -37,64 +37,12 @@ pub enum AuthMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct BackendsSection {
+    #[serde(default)]
     pub enabled: Vec<String>,
     #[serde(default)]
-    pub bubblewrap: BubblewrapBackendSection,
-    #[serde(default)]
-    pub docker: DockerBackendSection,
-    #[serde(default)]
-    pub gvisor: GVisorBackendSection,
-    #[serde(default)]
-    pub libkrun: LibkrunBackendSection,
-    #[serde(default)]
-    pub nsjail: NsjailBackendSection,
-    #[serde(default)]
-    pub podman: PodmanBackendSection,
-    #[serde(default)]
-    pub wasmtime: WasmtimeBackendSection,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-pub struct BubblewrapBackendSection {
-    pub agent_path: Option<String>,
-    pub bwrap_path: Option<String>,
-    pub rootfs_base: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-pub struct DockerBackendSection {
-    pub socket: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-pub struct GVisorBackendSection {
-    pub socket: Option<String>,
-    pub runtime: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-pub struct PodmanBackendSection {
-    pub socket: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-pub struct NsjailBackendSection {
-    pub agent_path: Option<String>,
-    pub chroot_base: Option<String>,
-    pub nsjail_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-pub struct WasmtimeBackendSection {
-    pub node_wasm_path: Option<String>,
-    pub python_wasm_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-pub struct LibkrunBackendSection {
-    pub runtime: Option<String>,
-    pub socket: Option<String>,
-    pub rootfs_dir: Option<String>,
+    pub search_dirs: Vec<String>,
+    #[serde(flatten, default)]
+    pub plugin_config: HashMap<String, HashMap<String, String>>,
 }
 
 impl DaemonConfig {
@@ -104,83 +52,15 @@ impl DaemonConfig {
 }
 
 impl BackendsSection {
-    pub fn config_for(&self, backend_id: &str) -> std::collections::HashMap<String, String> {
-        match backend_id {
-            "bubblewrap" => {
-                let mut config = std::collections::HashMap::new();
-                if let Some(path) = &self.bubblewrap.bwrap_path {
-                    config.insert("bwrap_path".into(), path.clone());
-                }
-                if let Some(path) = &self.bubblewrap.rootfs_base {
-                    config.insert("rootfs_base".into(), path.clone());
-                }
-                if let Some(path) = &self.bubblewrap.agent_path {
-                    config.insert("agent_path".into(), path.clone());
-                }
-                config
-            }
-            "docker" => {
-                let mut config = std::collections::HashMap::new();
-                if let Some(socket) = &self.docker.socket {
-                    config.insert("socket".into(), socket.clone());
-                }
-                config
-            }
-            "podman" => {
-                let mut config = std::collections::HashMap::new();
-                if let Some(socket) = &self.podman.socket {
-                    config.insert("socket".into(), socket.clone());
-                }
-                config
-            }
-            "nsjail" => {
-                let mut config = std::collections::HashMap::new();
-                if let Some(path) = &self.nsjail.nsjail_path {
-                    config.insert("nsjail_path".into(), path.clone());
-                }
-                if let Some(path) = &self.nsjail.chroot_base {
-                    config.insert("chroot_base".into(), path.clone());
-                }
-                if let Some(path) = &self.nsjail.agent_path {
-                    config.insert("agent_path".into(), path.clone());
-                }
-                config
-            }
-            "wasmtime" => {
-                let mut config = std::collections::HashMap::new();
-                if let Some(path) = &self.wasmtime.python_wasm_path {
-                    config.insert("python_wasm_path".into(), path.clone());
-                }
-                if let Some(path) = &self.wasmtime.node_wasm_path {
-                    config.insert("node_wasm_path".into(), path.clone());
-                }
-                config
-            }
-            "libkrun" => {
-                let mut config = std::collections::HashMap::new();
-                if let Some(socket) = &self.libkrun.socket {
-                    config.insert("socket".into(), socket.clone());
-                }
-                if let Some(runtime) = &self.libkrun.runtime {
-                    config.insert("runtime".into(), runtime.clone());
-                }
-                if let Some(rootfs_dir) = &self.libkrun.rootfs_dir {
-                    config.insert("rootfs_dir".into(), rootfs_dir.clone());
-                }
-                config
-            }
-            "gvisor" => {
-                let mut config = std::collections::HashMap::new();
-                if let Some(socket) = &self.gvisor.socket {
-                    config.insert("socket".into(), socket.clone());
-                }
-                if let Some(runtime) = &self.gvisor.runtime {
-                    config.insert("runtime".into(), runtime.clone());
-                }
-                config
-            }
-            _ => std::collections::HashMap::new(),
-        }
+    pub fn config_for(&self, backend_id: &str) -> HashMap<String, String> {
+        self.plugin_config
+            .get(backend_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn is_enabled(&self, backend_id: &str) -> bool {
+        self.enabled.is_empty() || self.enabled.iter().any(|item| item == backend_id)
     }
 }
 
@@ -192,7 +72,8 @@ pub fn load_config(path: &str) -> anyhow::Result<DaemonConfig> {
         .set_default("daemon.log_format", "text")?
         .set_default("database.url", "sqlite://agentsandbox.db")?
         .set_default("auth.mode", "single_user")?
-        .set_default("backends.enabled", vec!["docker"])?;
+        .set_default("backends.enabled", Vec::<String>::new())?
+        .set_default("backends.search_dirs", vec!["target/debug".to_string()])?;
 
     let config_path = Path::new(path);
     if config_path.exists() {
@@ -242,50 +123,35 @@ fn apply_env_overrides(cfg: &mut DaemonConfig) -> anyhow::Result<()> {
             .map(ToOwned::to_owned)
             .collect();
     }
-    if let Ok(path) = std::env::var("AS_BACKENDS_BUBBLEWRAP_BWRAP_PATH") {
-        cfg.backends.bubblewrap.bwrap_path = Some(path);
+    if let Ok(search_dirs) = std::env::var("AS_BACKENDS_SEARCH_DIRS") {
+        cfg.backends.search_dirs = search_dirs
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
     }
-    if let Ok(path) = std::env::var("AS_BACKENDS_BUBBLEWRAP_ROOTFS_BASE") {
-        cfg.backends.bubblewrap.rootfs_base = Some(path);
-    }
-    if let Ok(path) = std::env::var("AS_BACKENDS_BUBBLEWRAP_AGENT_PATH") {
-        cfg.backends.bubblewrap.agent_path = Some(path);
-    }
-    if let Ok(socket) = std::env::var("AS_BACKENDS_DOCKER_SOCKET") {
-        cfg.backends.docker.socket = Some(socket);
-    }
-    if let Ok(socket) = std::env::var("AS_BACKENDS_GVISOR_SOCKET") {
-        cfg.backends.gvisor.socket = Some(socket);
-    }
-    if let Ok(runtime) = std::env::var("AS_BACKENDS_GVISOR_RUNTIME") {
-        cfg.backends.gvisor.runtime = Some(runtime);
-    }
-    if let Ok(socket) = std::env::var("AS_BACKENDS_PODMAN_SOCKET") {
-        cfg.backends.podman.socket = Some(socket);
-    }
-    if let Ok(path) = std::env::var("AS_BACKENDS_NSJAIL_PATH") {
-        cfg.backends.nsjail.nsjail_path = Some(path);
-    }
-    if let Ok(path) = std::env::var("AS_BACKENDS_NSJAIL_CHROOT_BASE") {
-        cfg.backends.nsjail.chroot_base = Some(path);
-    }
-    if let Ok(path) = std::env::var("AS_BACKENDS_NSJAIL_AGENT_PATH") {
-        cfg.backends.nsjail.agent_path = Some(path);
-    }
-    if let Ok(path) = std::env::var("AS_BACKENDS_WASMTIME_PYTHON_WASM_PATH") {
-        cfg.backends.wasmtime.python_wasm_path = Some(path);
-    }
-    if let Ok(path) = std::env::var("AS_BACKENDS_WASMTIME_NODE_WASM_PATH") {
-        cfg.backends.wasmtime.node_wasm_path = Some(path);
-    }
-    if let Ok(socket) = std::env::var("AS_BACKENDS_LIBKRUN_SOCKET") {
-        cfg.backends.libkrun.socket = Some(socket);
-    }
-    if let Ok(runtime) = std::env::var("AS_BACKENDS_LIBKRUN_RUNTIME") {
-        cfg.backends.libkrun.runtime = Some(runtime);
-    }
-    if let Ok(path) = std::env::var("AS_BACKENDS_LIBKRUN_ROOTFS_DIR") {
-        cfg.backends.libkrun.rootfs_dir = Some(path);
+
+    for (key, value) in std::env::vars() {
+        let Some(rest) = key.strip_prefix("AS_BACKENDS_") else {
+            continue;
+        };
+        if rest == "ENABLED" || rest == "SEARCH_DIRS" {
+            continue;
+        }
+        let mut parts = rest.split('_');
+        let Some(backend_id) = parts.next() else {
+            continue;
+        };
+        let config_key = parts.collect::<Vec<_>>().join("_").to_ascii_lowercase();
+        if config_key.is_empty() {
+            continue;
+        }
+        cfg.backends
+            .plugin_config
+            .entry(backend_id.to_ascii_lowercase())
+            .or_default()
+            .insert(config_key, value);
     }
     Ok(())
 }
@@ -369,6 +235,7 @@ mode = "api_key"
 
 [backends]
 enabled = ["docker", "gvisor", "podman"]
+search_dirs = ["target/debug", "/opt/agentsandbox/plugins"]
 
 [backends.docker]
 socket = "/tmp/docker.sock"
@@ -388,16 +255,35 @@ socket = "/tmp/podman.sock"
         assert_eq!(cfg.database.url, "sqlite://dev.db");
         assert_eq!(cfg.auth.mode, AuthMode::ApiKey);
         assert_eq!(
-            cfg.backends.docker.socket.as_deref(),
+            cfg.backends.search_dirs,
+            vec!["target/debug", "/opt/agentsandbox/plugins"]
+        );
+        assert_eq!(
+            cfg.backends
+                .config_for("docker")
+                .get("socket")
+                .map(String::as_str),
             Some("/tmp/docker.sock")
         );
         assert_eq!(
-            cfg.backends.gvisor.socket.as_deref(),
+            cfg.backends
+                .config_for("gvisor")
+                .get("socket")
+                .map(String::as_str),
             Some("/tmp/gvisor.sock")
         );
-        assert_eq!(cfg.backends.gvisor.runtime.as_deref(), Some("runsc-kvm"));
         assert_eq!(
-            cfg.backends.podman.socket.as_deref(),
+            cfg.backends
+                .config_for("gvisor")
+                .get("runtime")
+                .map(String::as_str),
+            Some("runsc-kvm")
+        );
+        assert_eq!(
+            cfg.backends
+                .config_for("podman")
+                .get("socket")
+                .map(String::as_str),
             Some("/tmp/podman.sock")
         );
     }
@@ -420,6 +306,7 @@ auth:
   mode: single_user
 backends:
   enabled: [docker, gvisor, podman]
+  search_dirs: [target/debug, /opt/agentsandbox/plugins]
   gvisor:
     socket: /tmp/gvisor.sock
     runtime: runsc
@@ -433,12 +320,28 @@ backends:
         assert_eq!(cfg.database.url, "sqlite://yaml.db");
         assert_eq!(cfg.auth.mode, AuthMode::SingleUser);
         assert_eq!(
-            cfg.backends.gvisor.socket.as_deref(),
+            cfg.backends.search_dirs,
+            vec!["target/debug", "/opt/agentsandbox/plugins"]
+        );
+        assert_eq!(
+            cfg.backends
+                .config_for("gvisor")
+                .get("socket")
+                .map(String::as_str),
             Some("/tmp/gvisor.sock")
         );
-        assert_eq!(cfg.backends.gvisor.runtime.as_deref(), Some("runsc"));
         assert_eq!(
-            cfg.backends.podman.socket.as_deref(),
+            cfg.backends
+                .config_for("gvisor")
+                .get("runtime")
+                .map(String::as_str),
+            Some("runsc")
+        );
+        assert_eq!(
+            cfg.backends
+                .config_for("podman")
+                .get("socket")
+                .map(String::as_str),
             Some("/tmp/podman.sock")
         );
     }
@@ -468,6 +371,10 @@ enabled = ["docker"]
         let _port = EnvGuard::set("AS_DAEMON_PORT", "9999");
         let _db = EnvGuard::set("AS_DATABASE_URL", "sqlite://env.db");
         let _enabled = EnvGuard::set("AS_BACKENDS_ENABLED", "docker,gvisor,podman");
+        let _search_dirs = EnvGuard::set(
+            "AS_BACKENDS_SEARCH_DIRS",
+            "target/debug,/Users/example/.local/lib/agentsandbox/plugins",
+        );
         let _gvisor_socket = EnvGuard::set("AS_BACKENDS_GVISOR_SOCKET", "/env/gvisor.sock");
         let _gvisor_runtime = EnvGuard::set("AS_BACKENDS_GVISOR_RUNTIME", "runsc-debug");
         let _podman_socket = EnvGuard::set("AS_BACKENDS_PODMAN_SOCKET", "/env/podman.sock");
@@ -477,12 +384,28 @@ enabled = ["docker"]
         assert_eq!(cfg.database.url, "sqlite://env.db");
         assert_eq!(cfg.backends.enabled, vec!["docker", "gvisor", "podman"]);
         assert_eq!(
-            cfg.backends.gvisor.socket.as_deref(),
+            cfg.backends.search_dirs,
+            vec!["target/debug", "/Users/example/.local/lib/agentsandbox/plugins"]
+        );
+        assert_eq!(
+            cfg.backends
+                .config_for("gvisor")
+                .get("socket")
+                .map(String::as_str),
             Some("/env/gvisor.sock")
         );
-        assert_eq!(cfg.backends.gvisor.runtime.as_deref(), Some("runsc-debug"));
         assert_eq!(
-            cfg.backends.podman.socket.as_deref(),
+            cfg.backends
+                .config_for("gvisor")
+                .get("runtime")
+                .map(String::as_str),
+            Some("runsc-debug")
+        );
+        assert_eq!(
+            cfg.backends
+                .config_for("podman")
+                .get("socket")
+                .map(String::as_str),
             Some("/env/podman.sock")
         );
     }
@@ -491,20 +414,24 @@ enabled = ["docker"]
     fn config_for_returns_backend_specific_socket() {
         let backends = BackendsSection {
             enabled: vec!["docker".into(), "gvisor".into(), "podman".into()],
-            bubblewrap: BubblewrapBackendSection::default(),
-            docker: DockerBackendSection {
-                socket: Some("/docker.sock".into()),
-            },
-            gvisor: GVisorBackendSection {
-                socket: Some("/gvisor.sock".into()),
-                runtime: Some("runsc".into()),
-            },
-            libkrun: LibkrunBackendSection::default(),
-            nsjail: NsjailBackendSection::default(),
-            podman: PodmanBackendSection {
-                socket: Some("/podman.sock".into()),
-            },
-            wasmtime: WasmtimeBackendSection::default(),
+            search_dirs: vec!["target/debug".into()],
+            plugin_config: HashMap::from([
+                (
+                    "docker".into(),
+                    HashMap::from([("socket".into(), "/docker.sock".into())]),
+                ),
+                (
+                    "gvisor".into(),
+                    HashMap::from([
+                        ("socket".into(), "/gvisor.sock".into()),
+                        ("runtime".into(), "runsc".into()),
+                    ]),
+                ),
+                (
+                    "podman".into(),
+                    HashMap::from([("socket".into(), "/podman.sock".into())]),
+                ),
+            ]),
         };
 
         assert_eq!(
@@ -535,5 +462,17 @@ enabled = ["docker"]
                 .map(String::as_str),
             Some("/podman.sock")
         );
+    }
+
+    #[test]
+    fn enabled_filter_is_optional() {
+        let backends = BackendsSection {
+            enabled: Vec::new(),
+            search_dirs: vec!["target/debug".into()],
+            plugin_config: HashMap::new(),
+        };
+
+        assert!(backends.is_enabled("docker"));
+        assert!(backends.is_enabled("custom"));
     }
 }

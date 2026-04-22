@@ -1,7 +1,8 @@
 Reviewing: sample_code/buggy_script.py
-Using model: claude-sonnet-4-20250514
+Using provider: openai
+Using model: gpt-4.1-mini
 --------------------------------------------------
-Requesting review from Claude...
+Requesting review from LLM...
 
 Bugs found (<count>):
  - <bug 1>
@@ -9,7 +10,7 @@ Bugs found (<count>):
  - <bug 3>
 
 Explanation:
-<short explanation from Claude>
+<short explanation from the model>
 
 Running fixed code inside AgentSandbox...
 

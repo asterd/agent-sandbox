@@ -12,6 +12,7 @@ agentsandbox-backend-docker = { path = "../agentsandbox-backend-docker" }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]
 agentsandbox-conformance = { path = "../agentsandbox-conformance" }

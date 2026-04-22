@@ -17,9 +17,10 @@ source .venv/bin/activate
 pip install -e ../../sdks/python
 ```
 
-In another terminal, start the daemon from the repository root:
+In another terminal, build the backend plugins you want to exercise and start the daemon from the repository root:
 
 ```bash
+cargo build -p agentsandbox-backend-docker
 cargo run -p agentsandbox-daemon
 ```
 

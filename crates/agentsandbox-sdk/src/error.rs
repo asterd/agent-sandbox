@@ -1,4 +1,6 @@
-#[derive(thiserror::Error, Debug)]
+use serde::{Deserialize, Serialize};
+
+#[derive(thiserror::Error, Debug, Clone, Serialize, Deserialize)]
 pub enum BackendError {
     #[error("sandbox non trovata: {0}")]
     NotFound(String),

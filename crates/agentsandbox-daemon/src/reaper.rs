@@ -263,8 +263,9 @@ mod tests {
         let factory = MockFactory {
             backend: backend.clone(),
         };
-        registry.register(&factory);
-        registry.initialize(&factory, &HashMap::new()).await;
+        let descriptor = agentsandbox_sdk::plugin::PluginDescriptor::from(factory.describe());
+        let instance = Arc::from(factory.create(&HashMap::new()).unwrap());
+        registry.register_instance(descriptor, instance);
         let state = Arc::new(AppState {
             db: db.clone(),
             config: DaemonConfig {
@@ -282,13 +283,8 @@ mod tests {
                 },
                 backends: BackendsSection {
                     enabled: vec!["mock".into()],
-                    bubblewrap: Default::default(),
-                    docker: Default::default(),
-                    gvisor: Default::default(),
-                    libkrun: Default::default(),
-                    nsjail: Default::default(),
-                    podman: Default::default(),
-                    wasmtime: Default::default(),
+                    search_dirs: vec!["target/debug".into()],
+                    plugin_config: HashMap::new(),
                 },
             },
             registry: Arc::new(registry),

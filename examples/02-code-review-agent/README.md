@@ -1,6 +1,6 @@
 # Python Code Review Agent
 
-This example asks Claude to review a Python file, extracts fixed code as JSON, and verifies the fix inside an isolated AgentSandbox sandbox.
+This example asks an OpenAI-compatible model to review a Python file, extracts fixed code as JSON, and verifies the fix inside an isolated AgentSandbox sandbox.
 
 ## What it demonstrates
 
@@ -16,12 +16,14 @@ From this directory:
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-export ANTHROPIC_API_KEY=your_key_here
+cp .env.example .env
+# poi popola AGENTSANDBOX_LLM_API_KEY nella .env
 ```
 
-In another terminal, start the daemon from the repository root:
+In another terminal, build at least one backend plugin and start the daemon from the repository root:
 
 ```bash
+cargo build -p agentsandbox-backend-docker
 cargo run -p agentsandbox-daemon
 ```
 
@@ -39,12 +41,13 @@ See [expected_output.txt](expected_output.txt). Model wording and durations are 
 
 - `agent.py`: entry point
 - `sample_code/buggy_script.py`: intentionally broken Python file used for the demo
-- `requirements.txt`: local SDK plus Anthropic dependency
+- `requirements.txt`: local SDK plus OpenAI-compatible client deps
+- `.env.example`: OpenAI standard example, adattabile a Groq e provider compatibili
 
 ## Troubleshooting
 
-- `ANTHROPIC_API_KEY non impostata`
-  Export `ANTHROPIC_API_KEY` before running the example.
+- `AGENTSANDBOX_LLM_API_KEY non impostata`
+  Copia `.env.example` in `.env` e imposta la chiave del provider.
 - `ModuleNotFoundError: No module named 'agentsandbox'`
   Recreate the example virtualenv and run `pip install -r requirements.txt`.
 - `All connection attempts failed`

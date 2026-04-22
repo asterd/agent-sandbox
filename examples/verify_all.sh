@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLES_DIR="$ROOT_DIR/examples"
 TMP_OUT="${TMPDIR:-/tmp}/agentsandbox-examples.out"
+DAEMON_URL="${AGENTSANDBOX_DAEMON_URL:-http://127.0.0.1:7847}"
 PASS=0
 FAIL=0
 SKIP=0
@@ -25,11 +26,38 @@ find_python() {
 }
 
 check_daemon() {
-    if ! curl -sf http://127.0.0.1:7847/v1/health >/dev/null; then
-        echo "Daemon non raggiungibile. Avvia con: cargo run -p agentsandbox-daemon"
+    if ! curl -sf "$DAEMON_URL/v1/health" >/dev/null; then
+        echo "Daemon non raggiungibile su $DAEMON_URL. Avvia il daemon e almeno un plugin backend."
         exit 1
     fi
-    echo "Daemon raggiungibile"
+    echo "Daemon raggiungibile su $DAEMON_URL"
+}
+
+load_env_if_present() {
+    local env_file="$1"
+    if [[ -f "$env_file" ]]; then
+        set -a
+        source "$env_file"
+        set +a
+    fi
+}
+
+python_supports() {
+    local python_bin="$1"
+    shift
+    local modules="$*"
+    "$python_bin" -c "import $modules" >/dev/null 2>&1
+}
+
+skip_if_missing_python_modules() {
+    local name="$1"
+    local python_bin="$2"
+    local modules="$3"
+    if ! python_supports "$python_bin" "$modules"; then
+        skip_example "$name" "moduli Python mancanti: $modules"
+        return 0
+    fi
+    return 1
 }
 
 run_example() {
@@ -67,23 +95,34 @@ PYTHON_BIN="$(find_python)" || {
     exit 1
 }
 
-run_example "01-hello-sandbox" "01-hello-sandbox" "$PYTHON_BIN run.py"
-run_example "04-multi-backend-demo" "04-multi-backend-demo" "$PYTHON_BIN demo.py"
+if ! skip_if_missing_python_modules "01-hello-sandbox" "$PYTHON_BIN" "agentsandbox"; then
+    run_example "01-hello-sandbox" "01-hello-sandbox" "$PYTHON_BIN run.py"
+fi
 
-if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-    run_example "02-code-review-agent" "02-code-review-agent" "$PYTHON_BIN agent.py sample_code/buggy_script.py"
+if ! skip_if_missing_python_modules "04-multi-backend-demo" "$PYTHON_BIN" "agentsandbox,httpx"; then
+    run_example "04-multi-backend-demo" "04-multi-backend-demo" "$PYTHON_BIN demo.py"
+fi
 
-    if [[ -x "$EXAMPLES_DIR/03-dependency-auditor/node_modules/.bin/tsx" ]]; then
+load_env_if_present "$ROOT_DIR/.env"
+load_env_if_present "$EXAMPLES_DIR/02-code-review-agent/.env"
+load_env_if_present "$EXAMPLES_DIR/03-dependency-auditor/.env"
+
+if [[ -n "${AGENTSANDBOX_LLM_API_KEY:-}" ]]; then
+    if ! skip_if_missing_python_modules "02-code-review-agent" "$PYTHON_BIN" "agentsandbox,openai,dotenv"; then
+        run_example "02-code-review-agent" "02-code-review-agent" "$PYTHON_BIN agent.py sample_code/buggy_script.py"
+    fi
+
+    if [[ -x "$EXAMPLES_DIR/03-dependency-auditor/node_modules/.bin/tsx" && -d "$EXAMPLES_DIR/03-dependency-auditor/node_modules/openai" ]]; then
         run_example \
             "03-dependency-auditor" \
             "03-dependency-auditor" \
             "npm run start -- sample/package.json"
     else
-        skip_example "03-dependency-auditor" "npm install non eseguito"
+        skip_example "03-dependency-auditor" "dipendenze Node non installate"
     fi
 else
-    skip_example "02-code-review-agent" "ANTHROPIC_API_KEY non settata"
-    skip_example "03-dependency-auditor" "ANTHROPIC_API_KEY non settata"
+    skip_example "02-code-review-agent" "AGENTSANDBOX_LLM_API_KEY non settata"
+    skip_example "03-dependency-auditor" "AGENTSANDBOX_LLM_API_KEY non settata"
 fi
 
 echo ""

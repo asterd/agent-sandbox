@@ -8,6 +8,7 @@
 pub mod audit;
 pub mod config;
 pub mod error;
+pub mod external_backend;
 pub mod handlers;
 pub mod metrics;
 pub mod middleware;

@@ -152,13 +152,6 @@ dependencies = [
 name = "agentsandbox-daemon"
 version = "0.1.0"
 dependencies = [
- "agentsandbox-backend-bubblewrap",
- "agentsandbox-backend-docker",
- "agentsandbox-backend-gvisor",
- "agentsandbox-backend-libkrun",
- "agentsandbox-backend-nsjail",
- "agentsandbox-backend-podman",
- "agentsandbox-backend-wasmtime",
  "agentsandbox-core",
  "agentsandbox-sdk",
  "anyhow",
@@ -199,6 +192,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tokio",
  "uuid",
 ]
 

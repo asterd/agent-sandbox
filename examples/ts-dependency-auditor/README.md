@@ -1,6 +1,6 @@
 # TypeScript Dependency Auditor
 
-This example copies a `package.json` into a sandbox, installs dependencies, runs `npm audit`, and asks Claude for a short summary.
+This example copies a `package.json` into a sandbox, installs dependencies, runs `npm audit`, and asks an OpenAI-compatible model for a short summary.
 
 ## What it demonstrates
 
@@ -14,12 +14,14 @@ From this directory:
 
 ```bash
 npm install
-export ANTHROPIC_API_KEY=your_key_here
+cp .env.example .env
+# poi popola AGENTSANDBOX_LLM_API_KEY nella .env
 ```
 
-In another terminal, start the daemon from the repository root:
+In another terminal, build at least one backend plugin and start the daemon from the repository root:
 
 ```bash
+cargo build -p agentsandbox-backend-docker
 cargo run -p agentsandbox-daemon
 ```
 
@@ -37,16 +39,17 @@ npm run check
 
 ## Sample output
 
-The exact vulnerability counts, summary wording, sandbox id, and timings are dynamic because `npm audit` and Claude output change over time. The stable structure looks like this:
+The exact vulnerability counts, summary wording, sandbox id, and timings are dynamic because `npm audit` and the model output change over time. The stable structure looks like this:
 
 ```text
 Auditing: sample/package.json
-Using model: claude-sonnet-4-20250514
+Using provider: openai
+Using model: gpt-4.1-mini
 --------------------------------------------------
 Creating isolated sandbox...
 Installing dependencies inside sandbox...
 Running npm audit...
-Requesting summary from Claude...
+Requesting summary from LLM...
 
 Final report
 --------------------------------------------------
@@ -56,7 +59,7 @@ High: <number>
 Moderate: <number>
 Low: <number>
 
-Claude summary:
+LLM summary:
 <short Italian summary>
 ```
 

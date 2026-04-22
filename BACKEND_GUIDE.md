@@ -20,10 +20,11 @@ This guide is the minimum contract for adding a new backend.
 - reject unknown fields
 - reserve any runtime-controlled fields instead of letting callers override them
 
-## 4. Wire the daemon
+## 4. Ship the plugin binary
 
-- register the factory in the daemon registry
-- add config parsing for `[backends.<name>]`
+- add `src/main.rs` that calls `agentsandbox_sdk::plugin::serve_plugin(&YourBackendFactory)`
+- ensure the compiled executable name starts with `agentsandbox-backend-`
+- keep backend-specific config stringly-typed so the daemon can pass it through without linking your crate
 - expose the schema through `GET /v1/backends/:id/extensions-schema`
 
 ## 5. Pass conformance
@@ -37,4 +38,4 @@ This guide is the minimum contract for adding a new backend.
 - add `docs/backends/<name>.md`
 - document requirements, config, example routing, and security constraints
 
-If `cargo check -p agentsandbox-sdk` pulls in Docker, Podman, SQLx, or daemon code, the boundary is wrong.
+The daemon discovers plugins from configured search directories plus `PATH`. If your backend requires daemon code changes to be loadable, the boundary is wrong.

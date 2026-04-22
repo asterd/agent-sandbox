@@ -1,4 +1,4 @@
-"""Review a Python file with Claude and verify the fix in AgentSandbox."""
+"""Review a Python file with an OpenAI-compatible model and verify the fix."""
 
 from __future__ import annotations
 
@@ -10,10 +10,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import anthropic
 from agentsandbox import Sandbox
+from dotenv import load_dotenv
+from openai import OpenAI
 
-DEFAULT_MODEL = "claude-sonnet-4-20250514"
+DEFAULT_PROVIDER = "openai"
+DEFAULT_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_MODEL = "gpt-4.1-mini"
 
 SYSTEM_PROMPT = """Sei un code reviewer esperto Python.
 Rispondi sempre in JSON valido, senza markdown, con questa forma:
@@ -25,30 +28,36 @@ Rispondi sempre in JSON valido, senza markdown, con questa forma:
 Non aggiungere testo fuori dal JSON."""
 
 
-def require_api_key() -> None:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise RuntimeError("ANTHROPIC_API_KEY non impostata")
+def load_llm_config() -> tuple[str, str, OpenAI]:
+    load_dotenv()
+    provider = os.environ.get("AGENTSANDBOX_LLM_PROVIDER", DEFAULT_PROVIDER).strip()
+    base_url = os.environ.get("AGENTSANDBOX_LLM_BASE_URL", DEFAULT_BASE_URL).strip()
+    api_key = os.environ.get("AGENTSANDBOX_LLM_API_KEY", "").strip()
+    model = os.environ.get("AGENTSANDBOX_LLM_MODEL", DEFAULT_MODEL).strip()
+
+    if not api_key:
+        raise RuntimeError("AGENTSANDBOX_LLM_API_KEY non impostata")
+    if not model:
+        raise RuntimeError("AGENTSANDBOX_LLM_MODEL non impostata")
+
+    return provider, model, OpenAI(api_key=api_key, base_url=base_url)
 
 
-def extract_text(message: Any) -> str:
-    parts: list[str] = []
-    for block in getattr(message, "content", []):
-        if getattr(block, "type", None) == "text":
-            text = getattr(block, "text", "")
-            if text:
-                parts.append(text)
-    return "".join(parts).strip()
+def extract_text(response: Any) -> str:
+    message = response.choices[0].message
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content.strip()
+    return ""
 
 
-async def request_review(source: str, model: str) -> dict[str, Any]:
-    client = anthropic.Anthropic()
-
+async def request_review(client: OpenAI, source: str, model: str) -> dict[str, Any]:
     def create_message() -> Any:
-        return client.messages.create(
+        return client.chat.completions.create(
             model=model,
             max_tokens=2048,
-            system=SYSTEM_PROMPT,
             messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": (
@@ -63,12 +72,12 @@ async def request_review(source: str, model: str) -> dict[str, Any]:
     message = await asyncio.to_thread(create_message)
     payload = extract_text(message)
     if not payload:
-        raise RuntimeError("Claude ha risposto senza testo")
+        raise RuntimeError("Il provider LLM ha risposto senza testo")
 
     try:
         review = json.loads(payload)
     except json.JSONDecodeError as exc:
-        raise RuntimeError("Claude non ha restituito JSON valido") from exc
+        raise RuntimeError("Il provider LLM non ha restituito JSON valido") from exc
 
     if not isinstance(review, dict):
         raise RuntimeError("Formato risposta inatteso")
@@ -79,7 +88,7 @@ async def request_review(source: str, model: str) -> dict[str, Any]:
     if not isinstance(bugs, list) or not isinstance(fixed_code, str) or not isinstance(
         explanation, str
     ):
-        raise RuntimeError("JSON di Claude incompleto o malformato")
+        raise RuntimeError("JSON del provider LLM incompleto o malformato")
 
     return review
 
@@ -103,17 +112,16 @@ async def run_fixed_code(fixed_code: str) -> tuple[str, str, int, int]:
 
 
 async def review_and_run(filepath: str) -> None:
-    require_api_key()
-
-    model = os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL)
+    provider, model, client = load_llm_config()
     source = Path(filepath).read_text(encoding="utf-8")
 
     print(f"Reviewing: {filepath}")
+    print(f"Using provider: {provider}")
     print(f"Using model: {model}")
     print("-" * 50)
-    print("Requesting review from Claude...")
+    print("Requesting review from LLM...")
 
-    review = await request_review(source, model)
+    review = await request_review(client, source, model)
 
     bugs = [str(item) for item in review["bugs"]]
     print(f"\nBugs found ({len(bugs)}):")

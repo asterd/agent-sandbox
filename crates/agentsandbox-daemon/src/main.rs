@@ -3,19 +3,12 @@
 //! Boot sequence:
 //!   1. tracing subscriber (env-filter driven)
 //!   2. open (or create) the SQLite DB and run migrations
-//!   3. initialize the backend registry and health-check plugins
+//!   3. discover installed backend plugins and health-check them
 //!   4. spawn the TTL reaper
 //!   5. serve the v1 API on 127.0.0.1:7847
 
 use std::sync::Arc;
 
-use agentsandbox_backend_bubblewrap::BubblewrapBackendFactory;
-use agentsandbox_backend_docker::DockerBackendFactory;
-use agentsandbox_backend_gvisor::GVisorBackendFactory;
-use agentsandbox_backend_libkrun::LibkrunBackendFactory;
-use agentsandbox_backend_nsjail::NsjailBackendFactory;
-use agentsandbox_backend_podman::PodmanBackendFactory;
-use agentsandbox_backend_wasmtime::WasmtimeBackendFactory;
 use agentsandbox_daemon::{
     config::load_config, metrics::Metrics, reaper, registry::BackendRegistry, router,
     state::AppState,
@@ -45,54 +38,9 @@ async fn main() -> anyhow::Result<()> {
     let db = SqlitePoolOptions::new().connect_with(options).await?;
     sqlx::migrate!("./migrations").run(&db).await?;
 
-    let mut registry = BackendRegistry::new();
-    for backend_id in &cfg.backends.enabled {
-        let backend_config = cfg.backends.config_for(backend_id);
-        match backend_id.as_str() {
-            "bubblewrap" => {
-                let factory = BubblewrapBackendFactory;
-                registry.register(&factory);
-                registry.initialize(&factory, &backend_config).await;
-            }
-            "docker" => {
-                let factory = DockerBackendFactory;
-                registry.register(&factory);
-                registry.initialize(&factory, &backend_config).await;
-            }
-            "podman" => {
-                let factory = PodmanBackendFactory;
-                registry.register(&factory);
-                registry.initialize(&factory, &backend_config).await;
-            }
-            "gvisor" => {
-                let factory = GVisorBackendFactory;
-                registry.register(&factory);
-                registry.initialize(&factory, &backend_config).await;
-            }
-            "libkrun" => {
-                let factory = LibkrunBackendFactory;
-                registry.register(&factory);
-                registry.initialize(&factory, &backend_config).await;
-            }
-            "nsjail" => {
-                let factory = NsjailBackendFactory;
-                registry.register(&factory);
-                registry.initialize(&factory, &backend_config).await;
-            }
-            other => {
-                if other == "wasmtime" {
-                    let factory = WasmtimeBackendFactory;
-                    registry.register(&factory);
-                    registry.initialize(&factory, &backend_config).await;
-                } else {
-                    tracing::warn!(backend_id = %other, "backend non riconosciuto");
-                }
-            }
-        }
-    }
-
+    let registry = BackendRegistry::discover(&cfg.backends).await;
     if registry.list_available().is_empty() {
-        anyhow::bail!("nessun backend disponibile");
+        tracing::warn!("nessun backend plugin disponibile all'avvio");
     }
 
     let addr = cfg.listen_addr();

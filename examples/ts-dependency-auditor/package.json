@@ -7,8 +7,9 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.52.0",
-    "agentsandbox": "file:../../sdks/typescript"
+    "agentsandbox": "file:../../sdks/typescript",
+    "dotenv": "^16.4.7",
+    "openai": "^4.86.1"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

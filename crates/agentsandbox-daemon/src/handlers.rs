@@ -5,7 +5,7 @@
 //! status-code mapping; handlers never call `StatusCode` directly.
 
 use agentsandbox_core::compile_value;
-use agentsandbox_sdk::backend::{BackendCapabilities, SandboxState};
+use agentsandbox_sdk::{backend::SandboxState, plugin::PluginCapabilities};
 use agentsandbox_sdk::error::BackendError;
 use axum::{
     extract::{Extension, Path, Query, State},
@@ -31,9 +31,12 @@ pub async fn health(State(state): State<SharedState>) -> Json<Value> {
         .registry
         .list_available()
         .into_iter()
-        .map(|descriptor| descriptor.id)
+        .map(|descriptor| descriptor.id.clone())
         .collect();
-    let primary_backend = backends.first().copied().unwrap_or("unavailable");
+    let primary_backend = backends
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "unavailable".to_string());
     Json(json!({
         "status": "ok",
         "backend": primary_backend,
@@ -74,20 +77,16 @@ pub struct BackendCapabilitiesResponse {
     pub snapshot_restore: bool,
 }
 
-impl From<&BackendCapabilities> for BackendCapabilitiesResponse {
-    fn from(value: &BackendCapabilities) -> Self {
+impl From<&PluginCapabilities> for BackendCapabilitiesResponse {
+    fn from(value: &PluginCapabilities) -> Self {
         Self {
             network_isolation: value.network_isolation,
             memory_hard_limit: value.memory_hard_limit,
             cpu_hard_limit: value.cpu_hard_limit,
             persistent_storage: value.persistent_storage,
             self_contained: value.self_contained,
-            isolation_level: format!("{:?}", value.isolation_level),
-            supported_presets: value
-                .supported_presets
-                .iter()
-                .map(|preset| (*preset).to_string())
-                .collect(),
+            isolation_level: value.isolation_level.clone(),
+            supported_presets: value.supported_presets.clone(),
             rootless: value.rootless,
             snapshot_restore: value.snapshot_restore,
         }
@@ -104,7 +103,7 @@ pub async fn list_backends(State(state): State<SharedState>) -> Json<Value> {
                 id: descriptor.id.to_string(),
                 display_name: descriptor.display_name.to_string(),
                 version: descriptor.version.to_string(),
-                trait_version: descriptor.trait_version().to_string(),
+                trait_version: descriptor.trait_version.to_string(),
                 capabilities: BackendCapabilitiesResponse::from(&descriptor.capabilities),
                 extensions_supported: descriptor.extensions_schema.is_some(),
             })
@@ -125,6 +124,7 @@ pub async fn get_backend_extensions_schema(
         .ok_or_else(|| ApiError::backend_not_found(&id))?;
     let raw_schema = descriptor
         .extensions_schema
+        .as_deref()
         .ok_or_else(|| ApiError::backend_not_found(&id))?;
     let schema = serde_json::from_str(raw_schema)
         .map_err(|e| ApiError::internal(format!("schema extensions non valida per {id}: {e}")))?;
@@ -237,7 +237,7 @@ pub async fn create_sandbox(
     let ir = compile_value(raw_spec)?;
 
     let lease_token = uuid::Uuid::new_v4().to_string();
-    let (backend_id, backend) = state.registry.select(&ir).map_err(|e| {
+    let (backend_id, backend) = state.registry.select(&ir).await.map_err(|e| {
         ApiError::new(
             crate::error::ApiErrorCode::BackendUnavailable,
             e.to_string(),
@@ -247,7 +247,7 @@ pub async fn create_sandbox(
         ir.extensions.as_ref(),
         state.registry.available_descriptor(&backend_id),
     ) {
-        if let Some(schema) = descriptor.extensions_schema {
+        if let Some(schema) = descriptor.extensions_schema.as_deref() {
             validate_backend_extensions_schema(&backend_id, schema, extensions)?;
         }
     }
@@ -904,8 +904,9 @@ mod tests {
         let mut registry = BackendRegistry::new();
         let destroyed = factory.destroyed.clone();
         let last_extensions = factory.last_extensions.clone();
-        registry.register(&factory);
-        registry.initialize(&factory, &HashMap::new()).await;
+        let descriptor = agentsandbox_sdk::plugin::PluginDescriptor::from(factory.describe());
+        let backend = Arc::from(factory.create(&HashMap::new()).unwrap());
+        registry.register_instance(descriptor, backend);
         (
             Arc::new(AppState {
                 db,
@@ -997,13 +998,8 @@ mod tests {
             auth: AuthSection { mode },
             backends: BackendsSection {
                 enabled: vec![backend_id.into()],
-                bubblewrap: Default::default(),
-                docker: Default::default(),
-                gvisor: Default::default(),
-                libkrun: Default::default(),
-                nsjail: Default::default(),
-                podman: Default::default(),
-                wasmtime: Default::default(),
+                search_dirs: vec!["target/debug".into()],
+                plugin_config: HashMap::new(),
             },
         }
     }

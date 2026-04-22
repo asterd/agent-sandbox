@@ -1,6 +1,6 @@
 # Python Code Review Agent
 
-This example asks Claude to review a Python file, extracts fixed code as JSON, and then verifies the result inside an isolated AgentSandbox sandbox.
+This example asks an OpenAI-compatible model to review a Python file, extracts fixed code as JSON, and then verifies the result inside an isolated AgentSandbox sandbox.
 
 ## What it demonstrates
 
@@ -16,12 +16,14 @@ From this directory:
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-export ANTHROPIC_API_KEY=your_key_here
+cp .env.example .env
+# poi popola AGENTSANDBOX_LLM_API_KEY nella .env
 ```
 
-In another terminal, start the daemon from the repository root:
+In another terminal, build at least one backend plugin and start the daemon from the repository root:
 
 ```bash
+cargo build -p agentsandbox-backend-docker
 cargo run -p agentsandbox-daemon
 ```
 
@@ -37,9 +39,10 @@ The exact bug wording, explanation text, sandbox id, and timings are dynamic. Th
 
 ```text
 Reviewing: sample_code/buggy_script.py
-Using model: claude-sonnet-4-20250514
+Using provider: openai
+Using model: gpt-4.1-mini
 --------------------------------------------------
-Requesting review from Claude...
+Requesting review from LLM...
 
 Bugs found (3):
  - <bug 1>
@@ -47,7 +50,7 @@ Bugs found (3):
  - <bug 3>
 
 Explanation:
-<short explanation from Claude>
+<short explanation from the model>
 
 Running fixed code inside AgentSandbox...
 
@@ -64,4 +67,4 @@ Execution succeeded (exit 0, <duration-ms>ms)
 
 - `agent.py`: entry point
 - `sample_code/buggy_script.py`: intentionally broken Python file used for the demo
-- `.env.example`: optional environment variable reference
+- `.env.example`: OpenAI standard example, adattabile a Groq e provider compatibili

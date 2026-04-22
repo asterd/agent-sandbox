@@ -9,14 +9,8 @@ description = "HTTP daemon for AgentSandbox"
 [dependencies]
 agentsandbox-sdk = { path = "../agentsandbox-sdk" }
 agentsandbox-core = { path = "../agentsandbox-core" }
-agentsandbox-backend-bubblewrap = { path = "../agentsandbox-backend-bubblewrap" }
-agentsandbox-backend-docker = { path = "../agentsandbox-backend-docker" }
-agentsandbox-backend-gvisor = { path = "../agentsandbox-backend-gvisor" }
-agentsandbox-backend-libkrun = { path = "../agentsandbox-backend-libkrun" }
-agentsandbox-backend-nsjail = { path = "../agentsandbox-backend-nsjail" }
-agentsandbox-backend-podman = { path = "../agentsandbox-backend-podman" }
-agentsandbox-backend-wasmtime = { path = "../agentsandbox-backend-wasmtime" }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }

@@ -1,6 +1,6 @@
 # TypeScript Dependency Auditor
 
-This example copies a `package.json` into a sandbox, installs dependencies, runs `npm audit`, and asks Claude for a short summary.
+This example copies a `package.json` into a sandbox, installs dependencies, runs `npm audit`, and asks an OpenAI-compatible model for a short summary.
 
 ## What it demonstrates
 
@@ -14,12 +14,14 @@ From this directory:
 
 ```bash
 npm install
-export ANTHROPIC_API_KEY=your_key_here
+cp .env.example .env
+# poi popola AGENTSANDBOX_LLM_API_KEY nella .env
 ```
 
-In another terminal, start the daemon from the repository root:
+In another terminal, build at least one backend plugin and start the daemon from the repository root:
 
 ```bash
+cargo build -p agentsandbox-backend-docker
 cargo run -p agentsandbox-daemon
 ```
 
@@ -41,8 +43,8 @@ See [expected_output.txt](expected_output.txt). Vulnerability counts, summary wo
 
 ## Troubleshooting
 
-- `ANTHROPIC_API_KEY non impostata`
-  Export the API key before running `npm run start`.
+- `AGENTSANDBOX_LLM_API_KEY non impostata`
+  Copia `.env.example` in `.env` e imposta la chiave del provider.
 - `Cannot find package 'agentsandbox'`
   Run `npm install` in this example directory so the local workspace SDK is linked.
 - `All connection attempts failed`

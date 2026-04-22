@@ -1,9 +1,12 @@
-import Anthropic from "@anthropic-ai/sdk";
+import "dotenv/config";
 import { Sandbox } from "agentsandbox";
 import { readFileSync, existsSync } from "node:fs";
 import { basename } from "node:path";
+import OpenAI from "openai";
 
-const DEFAULT_MODEL = "claude-sonnet-4-20250514";
+const DEFAULT_PROVIDER = "openai";
+const DEFAULT_BASE_URL = "https://api.openai.com/v1";
+const DEFAULT_MODEL = "gpt-4.1-mini";
 
 interface SeverityCounts {
   critical: number;
@@ -14,18 +17,25 @@ interface SeverityCounts {
   total: number;
 }
 
-function requireApiKey(): void {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error("ANTHROPIC_API_KEY non impostata");
+function loadLlmConfig(): { provider: string; model: string; client: OpenAI } {
+  const provider = (process.env.AGENTSANDBOX_LLM_PROVIDER ?? DEFAULT_PROVIDER).trim();
+  const baseURL = (process.env.AGENTSANDBOX_LLM_BASE_URL ?? DEFAULT_BASE_URL).trim();
+  const apiKey = (process.env.AGENTSANDBOX_LLM_API_KEY ?? "").trim();
+  const model = (process.env.AGENTSANDBOX_LLM_MODEL ?? DEFAULT_MODEL).trim();
+
+  if (!apiKey) {
+    throw new Error("AGENTSANDBOX_LLM_API_KEY non impostata");
   }
+
+  return {
+    provider,
+    model,
+    client: new OpenAI({ apiKey, baseURL }),
+  };
 }
 
-function extractText(message: { content?: Array<{ type: string; text?: string }> }): string {
-  return (message.content ?? [])
-    .filter((block): block is { type: "text"; text: string } => block.type === "text" && typeof block.text === "string")
-    .map((block) => block.text)
-    .join("")
-    .trim();
+function extractText(completion: Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>): string {
+  return completion.choices[0]?.message?.content?.trim() ?? "";
 }
 
 function parseCounts(rawAuditOutput: string): SeverityCounts {
@@ -89,11 +99,16 @@ async function writeFileToSandbox(
   }
 }
 
-async function requestSummary(client: Anthropic, auditOutput: string, model: string): Promise<string> {
-  const message = await client.messages.create({
+async function requestSummary(client: OpenAI, auditOutput: string, model: string): Promise<string> {
+  const message = await client.chat.completions.create({
     model,
     max_tokens: 400,
     messages: [
+      {
+        role: "system",
+        content:
+          "Riassumi audit tecnici in italiano con tono operativo e conciso.",
+      },
       {
         role: "user",
         content:
@@ -106,7 +121,7 @@ async function requestSummary(client: Anthropic, auditOutput: string, model: str
 
   const summary = extractText(message);
   if (!summary) {
-    throw new Error("Claude ha risposto senza testo");
+    throw new Error("Il provider LLM ha risposto senza testo");
   }
   return summary;
 }
@@ -116,12 +131,11 @@ async function auditDependencies(packageJsonPath: string): Promise<{
   summary: string;
   rawAuditOutput: string;
 }> {
-  requireApiKey();
-  const model = process.env.ANTHROPIC_MODEL ?? DEFAULT_MODEL;
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const { provider, model, client } = loadLlmConfig();
   const packageJson = readFileSync(packageJsonPath, "utf-8");
 
   console.log(`Auditing: ${packageJsonPath}`);
+  console.log(`Using provider: ${provider}`);
   console.log(`Using model: ${model}`);
   console.log("-".repeat(50));
   console.log("Creating isolated sandbox...");
@@ -146,8 +160,8 @@ async function auditDependencies(packageJsonPath: string): Promise<{
   const auditResult = await sandbox.exec("cd /workspace && npm audit --json 2>&1 || true");
   const counts = parseCounts(auditResult.stdout);
 
-  console.log("Requesting summary from Claude...");
-  const summary = await requestSummary(anthropic, auditResult.stdout, model);
+  console.log("Requesting summary from LLM...");
+  const summary = await requestSummary(client, auditResult.stdout, model);
 
   return {
     counts,
@@ -175,7 +189,7 @@ async function main(): Promise<number> {
     console.log(`Moderate: ${counts.moderate}`);
     console.log(`Low: ${counts.low}`);
     console.log(`Info: ${counts.info}`);
-    console.log("\nClaude summary:");
+    console.log("\nLLM summary:");
     console.log(summary);
 
     return counts.critical > 0 ? 1 : 0;

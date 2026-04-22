@@ -1,10 +1,11 @@
 Auditing: sample/package.json
-Using model: claude-sonnet-4-20250514
+Using provider: openai
+Using model: gpt-4.1-mini
 --------------------------------------------------
 Creating isolated sandbox...
 Installing dependencies inside sandbox...
 Running npm audit...
-Requesting summary from Claude...
+Requesting summary from LLM...
 
 Final report
 --------------------------------------------------
@@ -16,5 +17,5 @@ Moderate: <number>
 Low: <number>
 Info: <number>
 
-Claude summary:
+LLM summary:
 <short Italian summary>

@@ -11,7 +11,13 @@ This guide is for a developer starting from a fresh clone of the repository.
 
 ## 1. Start the daemon
 
-From the repository root:
+First build at least one backend plugin, for example Docker:
+
+```bash
+cargo build -p agentsandbox-backend-docker
+```
+
+Then start the daemon from the repository root:
 
 ```bash
 cargo run -p agentsandbox-daemon
@@ -41,6 +47,7 @@ Expected response:
 ```
 
 If Docker is not available, the daemon exits during startup with a backend error instead of panicking.
+If no backend plugin is discoverable, the daemon still starts but sandbox creation will fail until you build or install one.
 
 ## 3. Run the Python SDK locally
 
